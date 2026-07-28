@@ -6,8 +6,16 @@
 */
 
 #include <SDL.h>
+#ifdef __APPLE__
+#include <OpenGL/gl.h>
+#include <OpenGL/glu.h>
+/* macOS's glu.h doesn't provide the "_GLUfuncptr" callback typedef that
+ * Linux/Mesa's GL/glu.h does; declare a compatible one here. */
+typedef void (*_GLUfuncptr)();
+#else
 #include <GL/gl.h>
 #include <GL/glu.h>
+#endif
 
 #include "main.h"
 #include "../m68000.h"
@@ -20,11 +28,69 @@ int len_main_palette;
 unsigned short MainPalette[256];
 unsigned short CtrlPalette[16];
 int fe2_bgcol;
+int in_atmosphere;
 
 unsigned int MainRGBPalette[256];
 unsigned int CtrlRGBPalette[16];
 
 unsigned long logscreen, logscreen2, physcreen, physcreen2;
+
+/* ---- TEMPORARY DEBUG INSTRUMENTATION --------------------------------
+ * Continuation of the investigation in src/hostcall.c (SKY_DEBUG): the
+ * hostcall.c logs proved that Nu_Put* hostcalls do still fire in GL mode,
+ * so the question now is what colour data quads/triangles (candidates
+ * for drawing ground/terrain) actually carry when flying in atmosphere.
+ * Prints one summary line every ~30 frames. Safe to remove: delete this
+ * block plus the PRIM_DEBUG_HIT() call sites in Nu_DrawQuad/Nu_DrawTriangle
+ * and the prim_debug_frame_end() call in Nu_DrawScreen. */
+#define PRIM_DEBUG 1
+
+#if PRIM_DEBUG
+struct prim_debug_stats {
+	int quad_count, tri_count;
+	int quad_r_min, quad_r_max, quad_g_min, quad_g_max, quad_b_min, quad_b_max;
+	int tri_r_min, tri_r_max, tri_g_min, tri_g_max, tri_b_min, tri_b_max;
+};
+static struct prim_debug_stats prim_stats = {
+	0, 0, 999, -1, 999, -1, 999, -1, 999, -1, 999, -1, 999, -1
+};
+
+#define PRIM_DEBUG_HIT(kind, r, g, b) do { \
+	prim_stats.kind##_count++; \
+	if ((r) < prim_stats.kind##_r_min) prim_stats.kind##_r_min = (r); \
+	if ((r) > prim_stats.kind##_r_max) prim_stats.kind##_r_max = (r); \
+	if ((g) < prim_stats.kind##_g_min) prim_stats.kind##_g_min = (g); \
+	if ((g) > prim_stats.kind##_g_max) prim_stats.kind##_g_max = (g); \
+	if ((b) < prim_stats.kind##_b_min) prim_stats.kind##_b_min = (b); \
+	if ((b) > prim_stats.kind##_b_max) prim_stats.kind##_b_max = (b); \
+} while (0)
+
+static void prim_debug_frame_end (void)
+{
+	static int frame;
+
+	frame++;
+	if ((frame % 30) == 0) {
+		fprintf (stderr,
+			"[PRIMDBG] quad=%d rgb=[%d-%d,%d-%d,%d-%d] | tri=%d rgb=[%d-%d,%d-%d,%d-%d]\n",
+			prim_stats.quad_count,
+			prim_stats.quad_r_min, prim_stats.quad_r_max,
+			prim_stats.quad_g_min, prim_stats.quad_g_max,
+			prim_stats.quad_b_min, prim_stats.quad_b_max,
+			prim_stats.tri_count,
+			prim_stats.tri_r_min, prim_stats.tri_r_max,
+			prim_stats.tri_g_min, prim_stats.tri_g_max,
+			prim_stats.tri_b_min, prim_stats.tri_b_max);
+		prim_stats.quad_count = prim_stats.tri_count = 0;
+		prim_stats.quad_r_min = prim_stats.quad_g_min = prim_stats.quad_b_min = 999;
+		prim_stats.quad_r_max = prim_stats.quad_g_max = prim_stats.quad_b_max = -1;
+		prim_stats.tri_r_min = prim_stats.tri_g_min = prim_stats.tri_b_min = 999;
+		prim_stats.tri_r_max = prim_stats.tri_g_max = prim_stats.tri_b_max = -1;
+	}
+}
+#endif /* PRIM_DEBUG */
+/* ---- END TEMPORARY DEBUG INSTRUMENTATION ---------------------------- */
+
 
 static SDL_Surface *sdlscrn;                             /* The SDL screen surface */
 BOOL bGrabMouse = FALSE;                          /* Grab the mouse cursor in the window */
@@ -92,6 +158,11 @@ static void change_vidmode ()
 	assert (info != NULL);
 
 	SDL_GL_SetAttribute (SDL_GL_DOUBLEBUFFER, 1);
+	/* Needed for real depth-tested 3D rendering (see the GL_DEPTH_TEST
+	 * enable below): without requesting a depth buffer here, enabling
+	 * GL_DEPTH_TEST later has no effect since there is nothing to test
+	 * against. */
+	SDL_GL_SetAttribute (SDL_GL_DEPTH_SIZE, 16);
 	
 	modes = SDL_OPENGL | SDL_ANYFORMAT | (bInFullScreen ? SDL_FULLSCREEN : 0);
 	
@@ -109,8 +180,17 @@ static void change_vidmode ()
 
 	glMatrixMode (GL_PROJECTION);
 	glLoadIdentity ();
-	/* aspect ratio of frontier's 3d view is 320/168 = 1.90 */
-	gluPerspective (36.5f, 1.9f, 1.0f, 10000000000.0f);
+	/* Aspect ratio of frontier's 3d view is 320/168 = 1.90 at the
+	 * original ST resolution, but the 3d viewport (set_main_viewport)
+	 * excludes the bottom control-panel strip and follows the actual
+	 * screen_w/screen_h - so the projection must follow it too, or the
+	 * 3D scene stretches/squashes relative to the 2D control panel at
+	 * any resolution other than the original 4:3-ish one. */
+	{
+		int ctrl_h = 32*screen_h/200;
+		float aspect = (float) screen_w / (float) (screen_h - ctrl_h);
+		gluPerspective (36.5f, aspect, 1.0f, 10000000000.0f);
+	}
 
 	glEnable (GL_TEXTURE_2D);
 	glGenTextures (1, &screen_tex);
@@ -127,7 +207,15 @@ static void change_vidmode ()
 	glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glMatrixMode (GL_MODELVIEW);
 	glLoadIdentity ();
-	glDisable (GL_DEPTH_TEST);
+	/* Opaque 3D primitives (terrain quads/triangles, ships, planets...)
+	 * are z-sorted only approximately by the znode tree (painter's
+	 * algorithm), which breaks down for intersecting/interleaved
+	 * geometry (e.g. ground quads vs terrain triangles at similar
+	 * depths). A real depth test fixes that. It's disabled again by
+	 * push_ortho()/re-enabled by pop_ortho() for the flat 2D overlay
+	 * (control panel, text, translucent 2D lines). */
+	glEnable (GL_DEPTH_TEST);
+	glDepthFunc (GL_LEQUAL);
 }
 
 void Screen_Init(void)
@@ -367,6 +455,8 @@ static void pop_ortho ()
 	glPopMatrix ();
 	glMatrixMode (GL_MODELVIEW);
 	glPopMatrix ();
+	/* Restore real depth testing for the 3D scene (see change_vidmode). */
+	glEnable (GL_DEPTH_TEST);
 }
 
 void Screen_ToggleRenderer ()
@@ -811,6 +901,64 @@ static void lighting_off ()
 	glDisable (GL_LIGHT0);
 }
 
+/*
+ * Billboard helpers: several 2D "sprite-like" primitives (twinkly
+ * circles/stars, distant planet dots, glow blobs...) are just a
+ * gluDisk() translated to a world position, with no attempt to keep
+ * them facing the camera. Viewed close to edge-on they degenerate to a
+ * near-invisible line, which is one of the main things making the GL
+ * renderer look incomplete compared to the ST software renderer (where
+ * these were always flat, screen-aligned sprites).
+ *
+ * billboard_begin() pushes a modelview matrix translated to (x,y,z)
+ * with the camera's rotation cancelled out, so that anything drawn in
+ * the local XY plane (e.g. gluDisk, which faces local +Z) ends up
+ * facing the viewer regardless of the current camera orientation.
+ */
+static void billboard_begin (float x, float y, float z)
+{
+	GLfloat m[16];
+
+	glPushMatrix ();
+	glTranslatef (x, y, z);
+	glGetFloatv (GL_MODELVIEW_MATRIX, m);
+
+	/* Cancel the rotation (and any scale) part of the matrix, keep the
+	 * translation: this leaves the local axes aligned with the camera's
+	 * eye-space axes, i.e. always facing the viewer. */
+	m[0] = 1.0f; m[1] = 0.0f; m[2] = 0.0f;
+	m[4] = 0.0f; m[5] = 1.0f; m[6] = 0.0f;
+	m[8] = 0.0f; m[9] = 0.0f; m[10] = 1.0f;
+
+	glLoadMatrixf (m);
+}
+
+static void billboard_end ()
+{
+	glPopMatrix ();
+}
+
+/* Object-space direction that corresponds to the camera's eye-space Z
+ * axis (roughly "towards the viewer"). Cheap approximation of a full
+ * look-at billboard, good enough to keep a thin axis-aligned ribbon
+ * (teardrop engine flares) from turning edge-on to the camera. */
+static void get_view_axis (float axis[3])
+{
+	GLfloat m[16];
+
+	glGetFloatv (GL_MODELVIEW_MATRIX, m);
+	axis[0] = m[2];
+	axis[1] = m[6];
+	axis[2] = m[10];
+}
+
+static void cross3 (const float a[3], const float b[3], float out[3])
+{
+	out[0] = a[1]*b[2] - a[2]*b[1];
+	out[1] = a[2]*b[0] - a[0]*b[2];
+	out[2] = a[0]*b[1] - a[1]*b[0];
+}
+
 void CALLBACK beginCallback(GLenum which)
 {
    glBegin(which);
@@ -1115,9 +1263,30 @@ void Nu_DrawTeardrop (void **data)
 	dir[1] -= ctrlpoints[0][1];
 	dir[2] -= ctrlpoints[0][2];
 	
-	ppd[0] = -dir[1];
-	ppd[1] = dir[0];
-	ppd[2] = dir[2];
+	/* Broaden the flare perpendicular to both its own axis (dir) and the
+	 * camera's viewing direction, so it stays roughly face-on to the
+	 * viewer instead of being pancake-thin from some angles (the "bit of
+	 * crap" the original author warned about). Falls back to the old
+	 * fixed in-plane perpendicular if degenerate (dir parallel to the
+	 * view axis). */
+	{
+		float view_axis[3], len_dir, len_ppd;
+
+		get_view_axis (view_axis);
+		cross3 (dir, view_axis, ppd);
+		len_ppd = sqrt (ppd[0]*ppd[0] + ppd[1]*ppd[1] + ppd[2]*ppd[2]);
+		len_dir = sqrt (dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+		if (len_ppd > 0.0001f * (len_dir + 1.0f)) {
+			float scale = len_dir / len_ppd;
+			ppd[0] *= scale;
+			ppd[1] *= scale;
+			ppd[2] *= scale;
+		} else {
+			ppd[0] = -dir[1];
+			ppd[1] = dir[0];
+			ppd[2] = dir[2];
+		}
+	}
 
 	//h = sqrt (dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
 	
@@ -1197,6 +1366,9 @@ void Nu_DrawTriangle (void **data)
 	znode_rdvertexf (data, v3);
 	znode_rdcolorv (data, rgb);
 	glColor3ub (rgb[0], rgb[1], rgb[2]);
+#if PRIM_DEBUG
+	PRIM_DEBUG_HIT (tri, rgb[0], rgb[1], rgb[2]);
+#endif
 	if (use_renderer == R_GLWIRE) {
 		glBegin (GL_LINE_STRIP);
 			glVertex3fv (v1);
@@ -1235,6 +1407,9 @@ void Nu_DrawQuad (void **data)
 	znode_rdcolor (data, &r, &g, &b);
 	
 	glColor3ub (r, g, b);
+#if PRIM_DEBUG
+	PRIM_DEBUG_HIT (quad, r, g, b);
+#endif
 	if (use_renderer == R_GLWIRE) {
 		glBegin (GL_LINE_STRIP);
 			glVertex3iv (v1);
@@ -1278,8 +1453,9 @@ void Nu_DrawTwinklyCircle (void **data)
 	
 	size = -0.002*((short)dreg2)*v1[2];
 	
-	glPushMatrix ();
-	glTranslatef (v1[0], v1[1], v1[2]);
+	/* billboard: always face the camera, otherwise this twinkle/star
+	 * dot degenerates to an invisible line when viewed edge-on. */
+	billboard_begin (v1[0], v1[1], v1[2]);
 	
 	if (size > 0.0f) gluDisk (qobj, 0.0, size, 32, 1);
 	
@@ -1294,7 +1470,7 @@ void Nu_DrawTwinklyCircle (void **data)
 			glVertex3f (0.0f, +size, 0.0f);
 		glEnd ();
 	}
-	glPopMatrix ();
+	billboard_end ();
 }
 
 void Nu_Put2DLine ()
@@ -1340,80 +1516,90 @@ void Nu_Draw2DLine (void **data)
 	pop_ortho ();
 }
 
-#define NUS_X	0.525731112119133606
-#define NUS_Z	0.850650808352039932
+#define NUSPHERE_SLICES	48
+#define NUSPHERE_STACKS	32
 
-static float nus_vdata[12][3] = {
-	{-NUS_X, 0.0, NUS_Z}, {NUS_X, 0.0, NUS_Z}, {-NUS_X, 0.0, -NUS_Z}, {NUS_X, 0.0, -NUS_Z},
-	{0.0, NUS_Z, NUS_X}, {0.0, NUS_Z, -NUS_X}, {0.0, -NUS_Z, NUS_X}, {0.0, -NUS_Z, -NUS_X},
-	{NUS_Z, NUS_X, 0.0}, {-NUS_Z, NUS_X, 0.0}, {NUS_Z, -NUS_X, 0.0}, {-NUS_Z, -NUS_X, 0.0}
-};
+/* The ST software renderer shades planets with a small palette of discrete
+ * colour steps (an 8-ish step ramp for the lit hemisphere, another for the
+ * dark one - see fe2.s: L3d5dc_PushPlanetCol / "lit side color"/"dark side
+ * color"), which is why it looks "banded"/patchy rather than smoothly
+ * shaded. Nu_PutPlanet only gives us two colours (object colour, light
+ * colour) rather than the actual ramp tables, so we approximate the same
+ * visual style: quantize the diffuse term into a handful of discrete
+ * bands instead of doing continuous GL Gouraud shading. */
+#define PLANET_SHADE_BANDS	8
 
-static int nus_tindices[20][3] = {
-	{0,4,1}, {0,9,4}, {9,5,4}, {4,5,8}, {4,8,1},
-	{8,10,1}, {8,3,10},{5,3,8}, {5,2,3}, {2,7,3},
-	{7,10,3}, {7,6,10}, {7,11,6}, {11,0,6}, {0,1,6},
-	{6,1,10}, {9,0,11}, {9,11,2}, {9,2,5}, {7,2,11}
-};
-
-static void Normalise (float v[3])
+static void planet_transform_normal (const GLfloat rot_matrix[16], const float n[3], float out[3])
 {
-	float d = sqrt (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-	d = 1.0f / d;
-	v[0] *= d;
-	v[1] *= d;
-	v[2] *= d;
+	/* Matches the glRotatef(180,1,0,0); glRotatef(180,0,1,0); pair
+	 * applied before glMultMatrixf(rot_matrix) in Nu_DrawPlanet: that
+	 * combination flips X and Y and keeps Z. */
+	float fx = -n[0], fy = -n[1], fz = n[2];
+
+	out[0] = rot_matrix[0]*fx + rot_matrix[4]*fy + rot_matrix[8]*fz;
+	out[1] = rot_matrix[1]*fx + rot_matrix[5]*fy + rot_matrix[9]*fz;
+	out[2] = rot_matrix[2]*fx + rot_matrix[6]*fy + rot_matrix[10]*fz;
 }
 
-static void nuSubdivide (float v1[3], float v2[3], float v3[3], int depth)
+static void planet_banded_color (const float n_world[3], const float light_dir[3],
+				  const int dark[3], const int lit[3])
 {
-	float v12[3], v23[3], v31[3];
-	int i;
+	float ndotl = n_world[0]*light_dir[0] + n_world[1]*light_dir[1] + n_world[2]*light_dir[2];
+	int step;
+	float t;
 
-	if (depth == 0) {
-		glBegin (GL_POLYGON);
-			glNormal3fv (v1); glVertex3fv (v1);
-			glNormal3fv (v2); glVertex3fv (v2);
-			glNormal3fv (v3); glVertex3fv (v3);
+	if (ndotl < 0.0f) ndotl = 0.0f;
+	if (ndotl > 1.0f) ndotl = 1.0f;
+
+	step = (int) (ndotl * PLANET_SHADE_BANDS);
+	if (step >= PLANET_SHADE_BANDS) step = PLANET_SHADE_BANDS - 1;
+	/* band-centered brightness, so each band is a flat, visible step
+	 * rather than a smooth ramp */
+	t = (step + 0.5f) / PLANET_SHADE_BANDS;
+
+	glColor3ub ((GLubyte) (dark[0] + t*(lit[0]-dark[0])),
+		    (GLubyte) (dark[1] + t*(lit[1]-dark[1])),
+		    (GLubyte) (dark[2] + t*(lit[2]-dark[2])));
+}
+
+/* Manually generated UV-sphere (rather than gluSphere) so each vertex can
+ * get its own quantized/banded colour - gluSphere only supports GL's own
+ * continuous per-pixel lighting. Combined with glShadeModel(GL_FLAT) this
+ * gives clearly visible shading steps like the ST software renderer,
+ * instead of a smooth GL-lit sphere. */
+static void draw_banded_sphere (float size, const GLfloat rot_matrix[16], const float light_dir[3],
+				 const int dark[3], const int lit[3])
+{
+	int i, j;
+
+	glShadeModel (GL_FLAT);
+
+	for (i = 0; i < NUSPHERE_STACKS; i++) {
+		float lat0 = (float) M_PI * (-0.5f + (float) i / NUSPHERE_STACKS);
+		float lat1 = (float) M_PI * (-0.5f + (float) (i+1) / NUSPHERE_STACKS);
+		float z0 = sin (lat0), zr0 = cos (lat0);
+		float z1 = sin (lat1), zr1 = cos (lat1);
+
+		glBegin (GL_QUAD_STRIP);
+		for (j = 0; j <= NUSPHERE_SLICES; j++) {
+			float lng = 2.0f * (float) M_PI * (float) j / NUSPHERE_SLICES;
+			float x = cos (lng), y = sin (lng);
+			float n0[3] = { x*zr0, y*zr0, z0 };
+			float n1[3] = { x*zr1, y*zr1, z1 };
+			float world0[3], world1[3];
+
+			planet_transform_normal (rot_matrix, n0, world0);
+			planet_banded_color (world0, light_dir, dark, lit);
+			glVertex3f (n0[0]*size, n0[1]*size, n0[2]*size);
+
+			planet_transform_normal (rot_matrix, n1, world1);
+			planet_banded_color (world1, light_dir, dark, lit);
+			glVertex3f (n1[0]*size, n1[1]*size, n1[2]*size);
+		}
 		glEnd ();
-		return;
 	}
 
-	for (i=0; i<3; i++) {
-		v12[i] = v1[i]+v2[i];
-		v23[i] = v2[i]+v3[i];
-		v31[i] = v3[i]+v1[i];
-	}
-	Normalise (v12);
-	Normalise (v23);
-	Normalise (v31);
-	nuSubdivide(v1, v12, v31, depth-1);
-	nuSubdivide(v2, v23, v12, depth-1);
-	nuSubdivide(v3, v31, v23, depth-1);
-	nuSubdivide(v12, v23, v31, depth-1);
-}
-
-/*
-static void NormCrossProd (float v1[3], float v2[3], float vout[3])
-{
-	vout[0] = v1[1]*v2[2] - v1[2]*v2[1];
-	vout[1] = v1[2]*v2[0] - v1[0]*v2[2];
-	vout[2] = v1[0]*v2[1] - v1[1]*v2[0];
-	Normalise (vout);
-}*/
-
-#define NUSPHERE_SUBDIVS	4
-
-void nuSphere (float size)
-{
-	int i;
-	glScalef (size, size, size);
-	for (i=0; i<20; i++) {
-		nuSubdivide (nus_vdata[nus_tindices[i][0]],
-				nus_vdata[nus_tindices[i][1]],
-				nus_vdata[nus_tindices[i][2]],
-				NUSPHERE_SUBDIVS);
-	}
+	glShadeModel (GL_SMOOTH);
 }
 
 /* not finished by a long shot */
@@ -1447,36 +1633,40 @@ void Nu_DrawPlanet (void **data)
 {
 	int v1[3];
 	int size;
-	float light_vec[4];
+	int obj_col_raw, light_col_raw;
+	int dark[3], lit[3];
+	float light_vec[4], light_dir[3], len;
 	GLfloat rot_matrix[16];
-	unsigned int obj_col[4], light_col[4];
 
-	/*obj_col[0] = 1000000000;
-	obj_col[1] = 1000000000;
-	obj_col[2] = 1000000000;
-	obj_col[3] = 0;*/
-	split_rgb444i (znode_rdlong (data), &obj_col[0], &obj_col[1], &obj_col[2]);
-	obj_col[3] = 0;
-	split_rgb444i (znode_rdlong (data), &light_col[0], &light_col[1], &light_col[2]);
-	light_col[3] = 0;
-
+	obj_col_raw = znode_rdlong (data);
+	light_col_raw = znode_rdlong (data);
 	size = znode_rdlong (data);
 	
 	znode_rdvertexf (data, light_vec);
 	light_vec[3] = 0.0f;
-	
-	glLightfv (GL_LIGHT1, GL_POSITION, light_vec);
 
-	glLightiv (GL_LIGHT1, GL_DIFFUSE, light_col);
-	glLightiv (GL_LIGHT1, GL_AMBIENT, obj_col);
+	len = sqrt (light_vec[0]*light_vec[0] + light_vec[1]*light_vec[1] + light_vec[2]*light_vec[2]);
+	if (len > 0.0001f) {
+		light_dir[0] = light_vec[0]/len;
+		light_dir[1] = light_vec[1]/len;
+		light_dir[2] = light_vec[2]/len;
+	} else {
+		light_dir[0] = 0.0f; light_dir[1] = 0.0f; light_dir[2] = 1.0f;
+	}
 
-//	glMaterialiv (GL_FRONT, GL_AMBIENT, obj_col);
-	glEnable (GL_LIGHTING);
-	glEnable (GL_LIGHT1);
-	glEnable (GL_NORMALIZE);
-	
-	glShadeModel (GL_SMOOTH);
-//	glColor3uiv (obj_col);
+	/* dark side = the object's base colour on its own; lit side = base
+	 * colour plus the light's colour contribution (clamped). This
+	 * matches the two endpoints the previous GL_LIGHT1-based ambient/
+	 * diffuse setup produced, but quantized into visible bands instead
+	 * of interpolated smoothly. */
+	split_rgb444b (obj_col_raw, &dark[0], &dark[1], &dark[2]);
+	split_rgb444b (light_col_raw, &lit[0], &lit[1], &lit[2]);
+	lit[0] += dark[0]; if (lit[0] > 255) lit[0] = 255;
+	lit[1] += dark[1]; if (lit[1] > 255) lit[1] = 255;
+	lit[2] += dark[2]; if (lit[2] > 255) lit[2] = 255;
+
+	glDisable (GL_LIGHTING);
+
 	znode_rdvertex (data, v1);
 	znode_rdmatrix (data, rot_matrix);
 
@@ -1489,15 +1679,9 @@ void Nu_DrawPlanet (void **data)
 	glMultMatrixf (rot_matrix);
 	glCullFace (GL_BACK);
 	glEnable (GL_CULL_FACE);
-	/* why the fucking fudge factor?? */
-	nuSphere (size*1.0080);
-	//gluSphere (qobj, size, 100, 100);
+	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit);
 	glDisable (GL_CULL_FACE);
 	glPopMatrix ();
-	
-	glDisable (GL_NORMALIZE);
-	glDisable (GL_LIGHTING);
-	glDisable (GL_LIGHT1);
 }
 
 void Nu_PutCircle ()
@@ -1526,10 +1710,11 @@ void Nu_DrawCircle (void **data)
 	
 	size = -0.002*((short)dreg2)*v1[2];
 	
-	glPushMatrix ();
-	glTranslatef (v1[0], v1[1], v1[2]);
+	/* billboard: this is used for distant planets/stars rendered as a
+	 * flat shaded dot, which must always face the camera. */
+	billboard_begin (v1[0], v1[1], v1[2]);
 	gluDisk (qobj, 0.0, size, 32, 1);
-	glPopMatrix ();
+	billboard_end ();
 }
 
 /* life is so strange */
@@ -1600,7 +1785,21 @@ void Nu_DrawCylinder (void **data)
 }
 
 /*
- * this primitive is WRONG.
+ * NU_OVALTHINGY is used by the 68k code to draw planet rings (see
+ * fe2.s: L3d648_PutPlanetRings / L3b9aa_FilledOvalThingy /
+ * L37fb2_ProjectOvalXYZ, and the "gas giant ring colours" comment
+ * nearby). The hostcall never passes an actual colour register, so
+ * previously this always drew a solid black filled disc. We now draw
+ * a translucent, neutral-tinted *annulus* (hollow in the middle, like
+ * a real ring) instead.
+ *
+ * (d, e) are BAM-style angles (32768 = half turn) used to orient the
+ * ring's tilt, matching the angle convention used elsewhere in this
+ * file. (f) looked like a third rotation in the same family, but a
+ * flat, uniformly coloured, rotationally-symmetric ring is invariant
+ * under rotation around its own normal, so it has no visible effect
+ * here and is intentionally not applied. If this still looks wrong
+ * in-game, the sign/axis of (d, e) is the first thing to try flipping.
  */
 void Nu_PutOval ()
 {
@@ -1617,29 +1816,37 @@ void Nu_PutOval ()
 void Nu_DrawOval (void **data)
 {
 	int v1[3];
-	int rad, r, g, b;
-	unsigned short d,e,f;
+	int rad;
+	short d, e, f;
 
 	znode_rdvertex (data, v1);
 
-	r = 0;
-	g = 0;
-	b = 0;
-	
 	d = (short) znode_rdlong (data);
 	e = (short) znode_rdlong (data);
 	f = (short) znode_rdlong (data);
+	(void) f;
 	rad = (short) znode_rdlong (data);
-	
-	glColor3ub (r, g, b);
+
+	/* No colour data is available for this primitive; use a neutral,
+	 * slightly translucent tint typical of planetary rings instead of
+	 * the previous solid black. */
+	glEnable (GL_BLEND);
+	/* Translucent surfaces shouldn't write to the depth buffer (only
+	 * test against it), otherwise they can wrongly occlude things drawn
+	 * after them that are actually behind their bounding geometry. */
+	glDepthMask (GL_FALSE);
+	glColor4ub (200, 190, 170, 160);
+
 	glPushMatrix ();
 	glTranslatef (v1[0], v1[1], v1[2]);
-	//printf ("%d,%d,%d\n", d,e,f);
-	//glRotatef (RAD_2_DEG*M_PI*(d/32768.0f), 0.0f, 1.0f, 0.0f);
-	//glRotatef (RAD_2_DEG*M_PI*(e/32768.0f), 1.0f, 0.0f, 0.0f);
-	//glRotatef (-RAD_2_DEG*M_PI*(f/65536.0f), 0.0f, 1.0f, 0.0f);
-	gluDisk (qobj, 0.0, rad, 32, 1);
+	glRotatef (180.0f * (d / 32768.0f), 0.0f, 1.0f, 0.0f);
+	glRotatef (180.0f * (e / 32768.0f), 1.0f, 0.0f, 0.0f);
+	/* Hollow annulus (not a filled disc): a ring should not cover the
+	 * body it surrounds. */
+	gluDisk (qobj, rad * 0.6, rad, 48, 1);
 	glPopMatrix ();
+	glDepthMask (GL_TRUE);
+	glDisable (GL_BLEND);
 }
 
 void Nu_PutBlob ()
@@ -1669,10 +1876,10 @@ void Nu_DrawBlob (void **data)
 			glVertex3iv (v1);
 		glEnd ();
 	} else {
-		glPushMatrix ();
-		glTranslatef (v1[0], v1[1], v1[2]);
+		/* billboard: keep the glow disk facing the camera. */
+		billboard_begin (v1[0], v1[1], v1[2]);
 		gluDisk (qobj, 0.0, -0.002*(rad)*v1[2], edges, 1);
-		glPopMatrix ();
+		billboard_end ();
 	}
 }
 void Nu_PutColoredPoint ()
@@ -1822,6 +2029,18 @@ static void Nu_DrawPrimitive (void *data)
  * of GL display lists to draw (in list order).
  *
  * Draw this crap starting from biggest value znodes.
+ *
+ * The z ordering BETWEEN nodes still comes purely from this tree walk
+ * (painter's algorithm on the game-supplied zval, not real 3D distance -
+ * some primitives, e.g. distant backdrop/cloud layers, are deliberately
+ * given small/arbitrary vertex Z regardless of their intended "far away"
+ * zval, so trusting a single global depth buffer across *all* nodes
+ * makes far-away things wrongly occlude near ones). Real GL depth
+ * testing is only applied *within* a single node's own primitive(s), by
+ * clearing the depth buffer before each node: that fixes local
+ * self-intersection between primitives batched into the same node (e.g.
+ * interleaved ground quads/triangles from the same terrain chunk)
+ * without disturbing the coarse inter-node order that already worked.
  */
 static void draw_3dview (struct ZNode *node)
 {
@@ -1830,6 +2049,7 @@ static void draw_3dview (struct ZNode *node)
 	
 	if (use_renderer) {
 		//fprintf (stderr, "Z=%d ", node->z);
+		glClear (GL_DEPTH_BUFFER_BIT);
 		Nu_DrawPrimitive (node->data);
 	}
 
@@ -1845,17 +2065,86 @@ static void set_gl_clear_col (int rgb)
 	glClearColor (r,g,b,0);
 }
 
+/*
+ * Approximate sky/ground backdrop for atmosphere flight.
+ *
+ * The real horizon rendering lives entirely in the ST software renderer's
+ * own primitive-list interpreter (see fe2.s: Fn_Draw3DView), which is
+ * skipped outright when the GL renderer is active and was never given a
+ * GL-side replacement. Precisely replicating it would need a dedicated
+ * new hostcall + a matching change to fe2.s. As a reasonable first cut
+ * that doesn't touch the 68k code at all, draw a two-tone vertical
+ * gradient (sky above the horizon, ground below) using the one colour
+ * value we do have every frame (fe2_bgcol, set by Call_Memset/
+ * Call_MemsetBlue) instead of a single flat glClearColor.
+ */
+static void draw_atmosphere_backdrop (void)
+{
+	unsigned int horizon = MainRGBPalette[fe2_bgcol];
+	float hr = (horizon & 0xff) / 255.0f;
+	float hg = ((horizon >> 8) & 0xff) / 255.0f;
+	float hb = ((horizon >> 16) & 0xff) / 255.0f;
+	/* zenith: darker/richer version of the horizon colour */
+	float zr = hr * 0.35f, zg = hg * 0.35f, zb = hb * 0.55f;
+	/* ground: warm tone blended with the horizon colour, so it stays
+	 * thematically consistent with whatever the sky is doing */
+	float gr = hr*0.5f + 0.425f, gg = hg*0.5f + 0.225f, gb = hb*0.5f + 0.275f;
+
+	glDisable (GL_DEPTH_TEST);
+	glMatrixMode (GL_PROJECTION);
+	glPushMatrix ();
+	glLoadIdentity ();
+	glOrtho (0, 320, 0, 200, -1, 1);
+	glMatrixMode (GL_MODELVIEW);
+	glPushMatrix ();
+	glLoadIdentity ();
+
+	/* sky: zenith (top) -> horizon colour (middle) */
+	glBegin (GL_QUADS);
+		glColor3f (zr, zg, zb);
+		glVertex2i (0, 200);
+		glVertex2i (320, 200);
+		glColor3f (hr, hg, hb);
+		glVertex2i (320, 100);
+		glVertex2i (0, 100);
+	glEnd ();
+
+	/* ground: horizon colour (middle) -> ground tone (bottom) */
+	glBegin (GL_QUADS);
+		glColor3f (hr, hg, hb);
+		glVertex2i (0, 100);
+		glVertex2i (320, 100);
+		glColor3f (gr, gg, gb);
+		glVertex2i (320, 0);
+		glVertex2i (0, 0);
+	glEnd ();
+
+	glMatrixMode (GL_PROJECTION);
+	glPopMatrix ();
+	glMatrixMode (GL_MODELVIEW);
+	glPopMatrix ();
+	glEnable (GL_DEPTH_TEST);
+}
+
 void Nu_DrawScreen ()
 {
 	/* build RGB palettes */
 	_BuildRGBPalette (MainRGBPalette, MainPalette, len_main_palette);
 	_BuildRGBPalette (CtrlRGBPalette, CtrlPalette, 16);
 	
+	if (in_atmosphere && use_renderer != R_GLWIRE) {
+		draw_atmosphere_backdrop ();
+	}
+	
 	//fprintf (stderr, "Render: ");
 	if (znode_cur) end_node ();
 	//printf ("Frame: %d znodes.\n", znode_buf_pos);
 	draw_3dview (znode_start);
 	//fprintf (stderr, "\n");
+
+#if PRIM_DEBUG
+	prim_debug_frame_end ();
+#endif
 
 	if (mouse_shown) {
 		SDL_ShowCursor (SDL_ENABLE);

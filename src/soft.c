@@ -21,6 +21,7 @@ int len_main_palette;
 unsigned short MainPalette[256];
 unsigned short CtrlPalette[16];
 int fe2_bgcol;
+int in_atmosphere;
 
 static unsigned short MainRGBPalette[256];
 static unsigned short CtrlRGBPalette[16];

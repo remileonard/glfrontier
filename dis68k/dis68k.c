@@ -4,12 +4,12 @@
 #include <string.h>
 #include <stdarg.h>
 
-static int end;
-static int base = 0x1c;
+static int32_t end;
+static int32_t base = 0x1c;
 static unsigned char *buffer;
-static int buf_pos = 0;
+static int32_t buf_pos = 0;
 static unsigned short *labels;
-static int pass = 1;
+static int32_t pass = 1;
 static unsigned char *probs;
 static enum GUESSMODE {
 	GUESS_NONE,
@@ -17,8 +17,8 @@ static enum GUESSMODE {
 	GUESS_WALK
 } guessmode;
 
-static int walk_stack[1024];
-static int *ws_top = &walk_stack[0];
+static int32_t walk_stack[1024];
+static int32_t *ws_top = &walk_stack[0];
 
 #define PUSH_WS(pos)	do { ws_top++; *ws_top = (pos); } while (0);
 #define POP_WS()	(*(ws_top--))
@@ -45,7 +45,7 @@ static void output (const char *format, ...)
 	va_end (argptr);
 }
 
-static void output_lab (int adr)
+static void output_lab (int32_t adr)
 {
 	if (labels[adr] & F_LABEL_MAJOR) output ("L%x", adr);
 	else output ("l%x", adr);
@@ -64,7 +64,7 @@ short rd_short(void)
 	return ((t1 << 8) | t2);
 }
 
-int rd_int(void)
+int32_t rd_int(void)
 {
 	short t1, t2, t3, t4;
 	t1 = rd_byte();
@@ -85,7 +85,7 @@ void wr_short(short x)
 	wr_byte((unsigned char)(x & 0xff));
 }
 
-void wr_int(int x)
+void wr_int(int32_t x)
 {
 	wr_byte((unsigned char)((x>>24) & 0xff));
 	wr_byte((unsigned char)((x>>16) & 0xff));
@@ -95,7 +95,7 @@ void wr_int(int x)
 
 const char *size_str[4] = { ".b", ".w", ".l", ".?" };
 /* to convert weird move sizes to standard sizes */
-const int move_size[4] = { 3, 0, 2, 1 };
+const int32_t move_size[4] = { 3, 0, 2, 1 };
 const char *Bcc_str[16] = {
 	NULL,NULL,"hi","ls","cc","cs","ne","eq",
 	"vc","vs","pl","mi","ge","lt","gt","le"
@@ -114,138 +114,138 @@ const char *Scc_str[16] = {
 typedef union Opcode {
 	unsigned short code;
 	struct move {
-		uint src_reg : 3;
-		uint src_mode : 3;
-		uint dest_mode : 3;
-		uint dest_reg : 3;
-		uint size : 2;
-		uint op : 2;
+		uint32_t src_reg : 3;
+		uint32_t src_mode : 3;
+		uint32_t dest_mode : 3;
+		uint32_t dest_reg : 3;
+		uint32_t size : 2;
+		uint32_t op : 2;
 	} move;
 	struct adr_index {
-		int displacement : 8;
-		uint zeros : 3;
-		uint ind_size : 1;
-		uint reg : 3;
-		uint reg_type : 1;
+		int32_t displacement : 8;
+		uint32_t zeros : 3;
+		uint32_t ind_size : 1;
+		uint32_t reg : 3;
+		uint32_t reg_type : 1;
 	} adr_index;
 	struct addq {
-		uint dest_reg : 3;
-		uint dest_mode : 3;
-		uint size : 2;
-		uint issub : 1;
-		uint data : 3;
-		uint op : 4;
+		uint32_t dest_reg : 3;
+		uint32_t dest_mode : 3;
+		uint32_t size : 2;
+		uint32_t issub : 1;
+		uint32_t data : 3;
+		uint32_t op : 4;
 	} addq;
 	struct jmp {
-		uint dest_reg : 3;
-		uint dest_mode : 3;
-		uint op : 10;
+		uint32_t dest_reg : 3;
+		uint32_t dest_mode : 3;
+		uint32_t op : 10;
 	} jmp;
 	struct addi {
-		uint dest_reg : 3;
-		uint dest_mode : 3;
-		uint size : 2;
-		uint OP6 : 8;
+		uint32_t dest_reg : 3;
+		uint32_t dest_mode : 3;
+		uint32_t size : 2;
+		uint32_t OP6 : 8;
 	} addi;
 	/* size and effective address */
 	struct type1 {
-		uint ea_reg : 3;
-		uint ea_mode : 3;
-		uint size : 2;
-		uint op : 8;
+		uint32_t ea_reg : 3;
+		uint32_t ea_mode : 3;
+		uint32_t size : 2;
+		uint32_t op : 8;
 	} type1;
 	/* reg, opmode, ea */
 	struct type2 {
-		uint ea_reg : 3;
-		uint ea_mode : 3;
-		uint op_mode : 3;
-		uint reg : 3;
-		uint op : 4;
+		uint32_t ea_reg : 3;
+		uint32_t ea_mode : 3;
+		uint32_t op_mode : 3;
+		uint32_t reg : 3;
+		uint32_t op : 4;
 	} type2;
 	struct MemShift {
-		uint ea_reg : 3;
-		uint ea_mode : 3;
-		uint OP3 : 2;
-		uint dr : 1;
-		uint type : 2;
-		uint OP0x1c : 5;
+		uint32_t ea_reg : 3;
+		uint32_t ea_mode : 3;
+		uint32_t OP3 : 2;
+		uint32_t dr : 1;
+		uint32_t type : 2;
+		uint32_t OP0x1c : 5;
 	} MemShift;
 	struct ASx {
-		uint reg : 3;
-		uint OP0 : 2;
-		uint ir : 1;
-		uint size : 2;
-		uint dr : 1;
-		uint count_reg : 3;
-		uint OP0xe : 4;
+		uint32_t reg : 3;
+		uint32_t OP0 : 2;
+		uint32_t ir : 1;
+		uint32_t size : 2;
+		uint32_t dr : 1;
+		uint32_t count_reg : 3;
+		uint32_t OP0xe : 4;
 	} ASx;
 	struct abcd {
-		uint src_reg : 3;
-		uint rm : 1;
-		uint OP16 : 5;
-		uint dest_reg : 3;
-		uint OP12 : 4;
+		uint32_t src_reg : 3;
+		uint32_t rm : 1;
+		uint32_t OP16 : 5;
+		uint32_t dest_reg : 3;
+		uint32_t OP12 : 4;
 	} abcd;
 	struct addx {
-		uint src_reg : 3;
-		uint rm : 1;
-		uint OP0 : 2;
-		uint size : 2;
-		uint OP1 : 1;
-		uint dest_reg : 3;
-		uint op : 4;
+		uint32_t src_reg : 3;
+		uint32_t rm : 1;
+		uint32_t OP0 : 2;
+		uint32_t size : 2;
+		uint32_t OP1 : 1;
+		uint32_t dest_reg : 3;
+		uint32_t op : 4;
 	} addx;
 	struct cmpm {
-		uint src_reg : 3;
-		uint OP1_1 : 3;
-		uint size : 2;
-		uint OP2_1 : 1;
-		uint dest_reg : 3;
-		uint OP0xb : 4;
+		uint32_t src_reg : 3;
+		uint32_t OP1_1 : 3;
+		uint32_t size : 2;
+		uint32_t OP2_1 : 1;
+		uint32_t dest_reg : 3;
+		uint32_t OP0xb : 4;
 	} cmpm;
 	/* branches */
 	struct DBcc {
-		uint reg : 3;
-		uint OP25 : 5;
-		uint cond : 4;
-		uint OP5 : 4;
+		uint32_t reg : 3;
+		uint32_t OP25 : 5;
+		uint32_t cond : 4;
+		uint32_t OP5 : 4;
 	} DBcc;
 	struct Bcc {
-		int displacement : 8;
-		uint cond : 4;
-		uint op : 4;
+		int32_t displacement : 8;
+		uint32_t cond : 4;
+		uint32_t op : 4;
 	} Bcc;
 	struct bra {
-		int displacement : 8;
-		uint op : 8;
+		int32_t displacement : 8;
+		uint32_t op : 8;
 	} bra;
 	struct movem {
-		uint dest_reg : 3;
-		uint dest_mode : 3;
-		uint sz : 1;
-		uint ONE : 3;
-		uint dr : 1;
-		uint NINE : 5;
+		uint32_t dest_reg : 3;
+		uint32_t dest_mode : 3;
+		uint32_t sz : 1;
+		uint32_t ONE : 3;
+		uint32_t dr : 1;
+		uint32_t NINE : 5;
 	} movem;
 	struct lea {
-		uint dest_reg : 3;
-		uint dest_mode : 3;
-		uint SEVEN : 3;
-		uint reg : 3;
-		uint FOUR : 4;
+		uint32_t dest_reg : 3;
+		uint32_t dest_mode : 3;
+		uint32_t SEVEN : 3;
+		uint32_t reg : 3;
+		uint32_t FOUR : 4;
 	} lea;
 	struct moveq {
-		int data : 8;
-		uint ZERO : 1;
-		uint reg : 3;
-		uint SEVEN : 4;
+		int32_t data : 8;
+		uint32_t ZERO : 1;
+		uint32_t reg : 3;
+		uint32_t SEVEN : 4;
 	} moveq;
 	struct exg {
-		uint dest_reg : 3;
-		uint op_mode : 5;
-		uint OP1 : 1;
-		uint src_reg : 3;
-		uint OP0xc : 4;
+		uint32_t dest_reg : 3;
+		uint32_t op_mode : 5;
+		uint32_t OP1 : 1;
+		uint32_t src_reg : 3;
+		uint32_t OP0xc : 4;
 	} exg;
 } Opcode;
 
@@ -254,7 +254,7 @@ typedef union Opcode {
  * modes $addr(Ax,Dy.s), and the PC flavoured version of that.
  * The immediate data comes first and must be skipped
  */
-int is_adrmod (int mode, int reg, int op_size, int skip_size)
+int32_t is_adrmod (int32_t mode, int32_t reg, int32_t op_size, int32_t skip_size)
 {
 	Opcode ext;
 	switch (skip_size) {
@@ -312,9 +312,9 @@ int is_adrmod (int mode, int reg, int op_size, int skip_size)
 }
 
 /* returns abs address if possible or 0xdeadbeef if not */
-uint put_adrmod (int mode, int reg, int op_size)
+uint32_t put_adrmod (int32_t mode, int32_t reg, int32_t op_size)
 {
-	uint temp;
+	uint32_t temp;
 	Opcode ext;
 	switch (mode) {
 		case 0: output ("d%d", reg); break;
@@ -391,7 +391,7 @@ uint put_adrmod (int mode, int reg, int op_size)
 	return 0xdeadbeef;
 }
 
-void aux_put_movem_regs (int mode, int low, int high)
+void aux_put_movem_regs (int32_t mode, int32_t low, int32_t high)
 {
 	if (!mode) {
 		/* (Ax)+ and control modes */
@@ -450,11 +450,11 @@ void aux_put_movem_regs (int mode, int low, int high)
 	}
 }
 
-void put_movem_regs (int mask, int mode)
+void put_movem_regs (int32_t mask, int32_t mode)
 {
-	int start;
-	int pos;
-	int pixie = 0;
+	int32_t start;
+	int32_t pos;
+	int32_t pixie = 0;
 
 	start = -1;
 	for (pos=0; pos < 16; pos++) {
@@ -474,15 +474,15 @@ void put_movem_regs (int mask, int mode)
 	}
 }
 
-void put_imm (int size)
+void put_imm (int32_t size)
 {
 	if (size == 0) {
 		rd_byte ();
-		output ("#$%x", (int)rd_byte ());
+		output ("#$%x", (int32_t)rd_byte ());
 	} else if (size == 1) {
-		output ("#$%hx", (int)rd_short ());
+		output ("#$%hx", (int32_t)rd_short ());
 	} else {
-		output ("#$%x", (int)rd_int ());
+		output ("#$%x", (int32_t)rd_int ());
 	}
 }
 
@@ -491,11 +491,11 @@ void put_imm (int size)
 static void dump_code ()
 {
 	Opcode op;
-	int size;
-	int temp;
+	int32_t size;
+	int32_t temp;
 	const char *str;
-	int last_ip;
-	int begin_labtab16 = 0;
+	int32_t last_ip;
+	int32_t begin_labtab16 = 0;
 
 	//output ("\topt\te-\r\n");
 	
@@ -888,7 +888,7 @@ static void dump_code ()
 			} else {
 				output ("bset\t");
 			}
-			output ("#$%x,", (int)rd_byte ());
+			output ("#$%x,", (int32_t)rd_byte ());
 			put_adrmod (op.type2.ea_mode, op.type2.ea_reg, 2);
 			goto done;
 		}
@@ -1363,11 +1363,11 @@ done:
  * Pass 0 as reloc for first fixup address, otherwise
  * pass returned valu. if returned value == 0 you are at the fucking end, man.
  */
-int get_fixup (int reloc)
+int32_t get_fixup (int32_t reloc)
 {
-	int old_bufpos;
-	int next;
-	static int reloc_pos;
+	int32_t old_bufpos;
+	int32_t next;
+	static int32_t reloc_pos;
 
 	old_bufpos = buf_pos;
 	if (reloc == 0) {
@@ -1398,8 +1398,8 @@ again:
 
 void do_fixups ()
 {
-	int reloc, next;
-	int pos;
+	int32_t reloc, next;
+	int32_t pos;
 
 	reloc = get_fixup (0);
 	fprintf (stderr, "relocs: ");
@@ -1427,9 +1427,9 @@ void do_fixups ()
 
 void guess_datasegs ()
 {
-	//int reloc;
-	int next, dist;
-	int pos, sec_start, num_dunno, prop;
+	//int32_t reloc;
+	int32_t next, dist;
+	int32_t pos, sec_start, num_dunno, prop;
 
 	if (guessmode == GUESS_WALK) {
 #if 0
@@ -1531,9 +1531,9 @@ skip_simple:
 	}
 }
 
-int main (int argc, char **argv)
+int32_t main (int32_t argc, char **argv)
 {
-	int i, j, pos, from, to, temp, inc;
+	int32_t i, j, pos, from, to, temp, inc;
 	FILE *fptr;
 	
 	if (argc < 2) {

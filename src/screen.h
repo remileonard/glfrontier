@@ -14,6 +14,11 @@ extern unsigned long VideoBase;
 extern unsigned char *VideoRaster;
 
 extern int fe2_bgcol;
+/* Set by Call_MemsetBlue (atmosphere flight "clear to sky colour") /
+ * cleared by Call_Memset (deep space "clear to black"). Used by the GL
+ * renderer as a heuristic for "are we flying in a planet's atmosphere"
+ * to decide whether to draw a sky/ground gradient backdrop. */
+extern int in_atmosphere;
 
 extern BOOL bGrabMouse;
 extern BOOL bInFullScreen;

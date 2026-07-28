@@ -1,7 +1,7 @@
 THIS=Makefile-C
 VERSION=20060623
 
-SRCOBJS := audio.o hostcall.o keymap.o main.o shortcut.o input.o joystick.o
+SRCOBJS := audio.o hostcall.o keymap.o main.o shortcut.o input.o joystick.o ini.o
 
 COMPILER ?= gcc
 CC := $(CROSS_COMPILE)$(COMPILER)
@@ -12,7 +12,7 @@ SDL_LIBS := $(shell $(SDL_CONFIG) --libs)
 
 CFLAGS := -O3 -fomit-frame-pointer -Wall -Wno-unused $(SDL_CFLAGS) -DOGG_MUSIC
 
-LIBS := -lvorbisfile -lvorbis -logg -lini $(SDL_LIBS) -lSDL_image
+LIBS := -lvorbisfile -lvorbis -logg $(SDL_LIBS) -lSDL_image
 
 WITH_GL=y
 ifeq ($(WITH_GL),y)

@@ -1,4 +1,4 @@
-#include <ini.h>
+#include "ini.h"
 #include <SDL.h>
 
 #include "main.h"
