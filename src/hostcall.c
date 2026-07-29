@@ -144,7 +144,6 @@ void Call_Memset ()
 #endif
 	}
 	fe2_bgcol = 0;
-	in_atmosphere = 0;
 }
 
 void Call_MemsetBlue ()
@@ -169,7 +168,6 @@ void Call_MemsetBlue ()
 #endif
 	}
 	fe2_bgcol = 0xe;
-	in_atmosphere = 1;
 }
 
 void Call_Memcpy ()
@@ -492,6 +490,12 @@ void Call_BlitBmp ()
 	if (org_y < 0) return;
 	if (height > 200) return;
 	if (width > 320) return;
+	/* Defensive: the original checks never guarded against a
+	 * negative/zero width or height, which turns the pixel loops below
+	 * into a huge (or "infinite" until it segfaults) out-of-bounds
+	 * write instead of a no-op. */
+	if (width <= 0) return;
+	if (height <= 0) return;
 	
 	plane_incr = 2*height*width;
 	

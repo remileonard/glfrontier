@@ -3,7 +3,6 @@ frontier
 fe2.s.*
 fixups.h
 gen
-fe2.s
 dis68k
 .DS_Store
 build/*

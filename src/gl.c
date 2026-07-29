@@ -148,6 +148,29 @@ static void set_ctrl_viewport ()
 	glViewport (0, 0, screen_w, screen_h);
 }
 
+/*
+ * The near plane is what actually does the near clipping in the GL path,
+ * because the engine skips its own: see L3aef8_ProjectTriangle & friends
+ * in fe2.s, where
+ *
+ *	tst.w	gl_renderer_on
+ *	bne.s	l3afd0		<- jumps over the whole clip/reject stage
+ *
+ * hands us the primitive raw. The `cmp.l #$40,d2 / blt l398c8` near test
+ * does not clip anything either: l398c8 only stamps the sentinel
+ * $80028002 over the *2D* coords at (a0), while the *3D* viewing coords
+ * at 4(a0) - exactly what znode_wrvertex reads - were already stored and
+ * stay valid.
+ *
+ * So primitives with z < 64, and even z < 0 (behind the camera), do reach
+ * us. Keep the near plane small or near geometry (station docking bay
+ * walls, a ship right alongside) gets sliced off. There is no depth
+ * buffer to trade precision against, so there is nothing to gain by
+ * pushing it out.
+ */
+#define GL_NEAR_PLANE	1.0f
+#define GL_FAR_PLANE	10000000000.0f
+
 static void change_vidmode ()
 {
 	const SDL_VideoInfo *info = NULL;
@@ -158,11 +181,9 @@ static void change_vidmode ()
 	assert (info != NULL);
 
 	SDL_GL_SetAttribute (SDL_GL_DOUBLEBUFFER, 1);
-	/* Needed for real depth-tested 3D rendering (see the GL_DEPTH_TEST
-	 * enable below): without requesting a depth buffer here, enabling
-	 * GL_DEPTH_TEST later has no effect since there is nothing to test
-	 * against. */
-	SDL_GL_SetAttribute (SDL_GL_DEPTH_SIZE, 16);
+	/* No depth buffer is requested: the 3D view is drawn with a pure
+	 * painter's algorithm, exactly like the software renderer. See
+	 * draw_3dview. */
 	
 	modes = SDL_OPENGL | SDL_ANYFORMAT | (bInFullScreen ? SDL_FULLSCREEN : 0);
 	
@@ -189,7 +210,7 @@ static void change_vidmode ()
 	{
 		int ctrl_h = 32*screen_h/200;
 		float aspect = (float) screen_w / (float) (screen_h - ctrl_h);
-		gluPerspective (36.5f, aspect, 1.0f, 10000000000.0f);
+		gluPerspective (36.5f, aspect, GL_NEAR_PLANE, GL_FAR_PLANE);
 	}
 
 	glEnable (GL_TEXTURE_2D);
@@ -207,15 +228,8 @@ static void change_vidmode ()
 	glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glMatrixMode (GL_MODELVIEW);
 	glLoadIdentity ();
-	/* Opaque 3D primitives (terrain quads/triangles, ships, planets...)
-	 * are z-sorted only approximately by the znode tree (painter's
-	 * algorithm), which breaks down for intersecting/interleaved
-	 * geometry (e.g. ground quads vs terrain triangles at similar
-	 * depths). A real depth test fixes that. It's disabled again by
-	 * push_ortho()/re-enabled by pop_ortho() for the flat 2D overlay
-	 * (control panel, text, translucent 2D lines). */
-	glEnable (GL_DEPTH_TEST);
-	glDepthFunc (GL_LEQUAL);
+	/* GL_DEPTH_TEST stays off for good: the 3D view is a painter's
+	 * algorithm, see draw_3dview. */
 }
 
 void Screen_Init(void)
@@ -455,8 +469,6 @@ static void pop_ortho ()
 	glPopMatrix ();
 	glMatrixMode (GL_MODELVIEW);
 	glPopMatrix ();
-	/* Restore real depth testing for the 3D scene (see change_vidmode). */
-	glEnable (GL_DEPTH_TEST);
 }
 
 void Screen_ToggleRenderer ()
@@ -1022,29 +1034,97 @@ static void put_complex_start_4real ()
 	no_znodes_kthx = TRUE;
 }
 
-/* well it works */
-static inline void push_tess_vertex (GLdouble v[3])
+/*
+ * Complex shapes are tessellated in SCREEN space: every contour vertex is
+ * pushed through gluProject and the resulting triangles are drawn under an
+ * ortho projection (see Nu_DrawComplexStart).
+ *
+ * That only works for vertices actually in front of the camera. A vertex at
+ * or behind the eye plane (eye z >= 0 - znode_wrvertex negates z, so eye z is
+ * negative in front) has no meaningful projection.
+ *
+ * This code used to simply `return` on those vertices, dropping them from the
+ * contour. Dropping a vertex does NOT clip a polygon, it corrupts its outline:
+ * the shape collapses into whatever the remaining points happen to describe.
+ * That is why the player ship's own hull vanished in rear view (its contour
+ * wraps around the camera) while the decals on it - separate triangles/quads -
+ * still drew. The software renderer gets this right because fe2.s clips those
+ * polygons properly in 2D (L3b276/L3b30a, handling the $80028002 sentinels),
+ * a stage the GL path deliberately skips.
+ *
+ * So do the clipping for real: accumulate the contour in eye space, clip it
+ * against the near plane (Sutherland-Hodgman), and only then project.
+ */
+static GLdouble contour_v[MAX_TESS_VERTICES][3];
+static int contour_n;
+
+static inline void push_contour_vertex (GLdouble v[3])
 {
-	static double prev[3];
+	if (contour_n > 0) {
+		const GLdouble *p = contour_v[contour_n-1];
+		if ((p[0]==v[0]) && (p[1]==v[1]) && (p[2]==v[2])) return;
+	}
+	if (contour_n >= MAX_TESS_VERTICES) return;
 
-	if ((v[0]==prev[0]) && (v[1]==prev[1]) && (v[2]==prev[2])) return;
-	prev[0] = v[0];
-	prev[1] = v[1];
-	prev[2] = v[2];
+	contour_v[contour_n][0] = v[0];
+	contour_v[contour_n][1] = v[1];
+	contour_v[contour_n][2] = v[2];
+	contour_n++;
+}
 
-	if (!gluProject (v[0],v[1],v[2], tessModelMatrix, tessProjMatrix, tessViewport,
-			&v[0], &v[1], &v[2])) {
-		//printf ("fuck %f,%f,%f\n", prev[0], prev[1], prev[2]);
-		tess_vpos--;
-	} else {
-		/* bad return.. */
-		if (prev[2] >= 0.0f) {
-			/*printf ("(%.2f,%.2f,%.2f) -> (%.2f,%.2f,%.2f)\n",
-					prev[0], prev[1], prev[2],
-					v[0], v[1], v[2]);
-			*/return;
+/* Clip polygon `in` (n vertices) to the half space in front of the near
+ * plane, i.e. eye z <= -GL_NEAR_PLANE. Returns the vertex count written to
+ * `out`, which needs room for n+1. */
+static int clip_contour_near (GLdouble in[][3], int n, GLdouble out[][3], int maxout)
+{
+	const double zlim = -(double) GL_NEAR_PLANE;
+	int i, k, m = 0;
+
+	for (i = 0; i < n; i++) {
+		const GLdouble *a = in[i];
+		const GLdouble *b = in[(i+1) % n];
+		int a_in = (a[2] <= zlim);
+		int b_in = (b[2] <= zlim);
+
+		if (a_in && m < maxout) {
+			for (k = 0; k < 3; k++) out[m][k] = a[k];
+			m++;
 		}
-		gluTessVertex (tobj, v, v);
+		if ((a_in != b_in) && m < maxout) {
+			double t = (zlim - a[2]) / (b[2] - a[2]);
+			for (k = 0; k < 3; k++) out[m][k] = a[k] + t*(b[k] - a[k]);
+			m++;
+		}
+	}
+
+	return m;
+}
+
+/* Clip, project and hand the current contour to the tessellator. The
+ * projected coordinates must stay alive until gluTessEndPolygon, which is
+ * why they go into the persistent tess_vertices[] pool. */
+static void flush_contour ()
+{
+	static GLdouble clipped[MAX_TESS_VERTICES+1][3];
+	int n, i;
+
+	n = clip_contour_near (contour_v, contour_n, clipped, MAX_TESS_VERTICES+1);
+	contour_n = 0;
+	if (n < 3) return;
+
+	for (i = 0; i < n; i++) {
+		GLdouble *d;
+
+		if (tess_vpos >= MAX_TESS_VERTICES) break;
+		d = tess_vertices[tess_vpos];
+
+		if (!gluProject (clipped[i][0], clipped[i][1], clipped[i][2],
+				 tessModelMatrix, tessProjMatrix, tessViewport,
+				 &d[0], &d[1], &d[2]))
+			continue;
+
+		tess_vpos++;
+		gluTessVertex (tobj, d, d);
 	}
 }
 
@@ -1061,10 +1141,9 @@ void Nu_DrawComplexSNext (void **data)
 		znode_rdvertexd (data, tess_vertices[tess_vpos]);
 		glVertex3dv (tess_vertices[tess_vpos++]);
 	} else {
-		assert (tess_vpos < MAX_TESS_VERTICES);
-		znode_rdvertexd (data, tess_vertices[tess_vpos]);
-		push_tess_vertex (tess_vertices[tess_vpos]);
-		tess_vpos++;
+		GLdouble v[3];
+		znode_rdvertexd (data, v);
+		push_contour_vertex (v);
 	}
 }
 void Nu_ComplexSBegin ()
@@ -1100,6 +1179,7 @@ void Nu_DrawComplexStart (void **data)
 		gluTessProperty(tobj, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_ODD);
 		gluTessBeginPolygon (tobj, NULL);
 		gluTessBeginContour (tobj);
+		contour_n = 0;
 	} else {
 		glBegin (GL_LINE_STRIP);
 	}
@@ -1119,6 +1199,7 @@ void Nu_ComplexEnd ()
 void Nu_DrawComplexEnd (void **data)
 {
 	if (use_renderer == R_GL) {
+		flush_contour ();
 		gluTessEndContour (tobj);
 		gluTessEndPolygon (tobj);
 		
@@ -1141,6 +1222,7 @@ void Nu_ComplexStartInner ()
 void Nu_DrawComplexStartInner (void **data)
 {
 	if (use_renderer == R_GL) {
+		flush_contour ();
 		gluTessEndContour (tobj);
 		gluTessBeginContour (tobj);
 	} else if (use_renderer == R_GLWIRE) {
@@ -1224,9 +1306,8 @@ void Nu_DrawComplexBezier (void **data)
 		return;
 	}
 	for (i=0; i<=bezier_steps; i++) {
-		eval_bezier (&tess_vertices[tess_vpos][0], i*delta, ctrlpoints);
-		push_tess_vertex (tess_vertices[tess_vpos]);
-		tess_vpos++;
+		eval_bezier (v, i*delta, ctrlpoints);
+		push_contour_vertex (v);
 	}
 }
 
@@ -1602,6 +1683,177 @@ static void draw_banded_sphere (float size, const GLfloat rot_matrix[16], const 
 	glShadeModel (GL_SMOOTH);
 }
 
+/*
+ * Ground rendering.
+ *
+ * The planet surface *is* the ground: fe2.s L3cd9c_ProjectPlanet always
+ * ends up in fuck_planet -> hcall Nu_PutPlanet, passing the planet
+ * position, radius, base colour (planet_col1) and the lighting vector,
+ * both when the planet is a distant dot and when we are flying in its
+ * atmosphere. So all the parameters the software renderer uses are
+ * already here - we just have to draw the surface properly.
+ *
+ * draw_banded_sphere() above cannot do that job when we are close: with a
+ * fixed 48x32 UV sphere, at an altitude of a few thousandths of the
+ * planet radius the entire visible surface falls *inside a single quad*
+ * of the mesh. The nearest mesh vertices sit ~5 degrees away, i.e. far
+ * below the true horizon, so the tessellated chord passes underneath the
+ * camera and no ground is drawn at all.
+ *
+ * So when the camera is near the surface we draw the ground as the *cone
+ * of directions in which the surface is visible*, rather than as a patch
+ * of surface positioned in space. That distinction is the whole point:
+ * tessellating the visible spherical cap, from the sub-camera point out
+ * to the tangent horizon at acos(R/d), collapses to a single point when
+ * landed (d == R), and its vertices centre + R*n are a difference of two
+ * quantities of magnitude R, pure cancellation once cast to float for
+ * glVertex3f. The direction cone has neither problem - see theta_max
+ * below. Rings are concentrated towards the horizon, where the
+ * silhouette needs the resolution.
+ *
+ * Shading reuses planet_banded_color() unchanged, so the ground gets
+ * exactly the same lit/dark banded ramp - and therefore the same colours
+ * - as the rest of the planet. The lighting vector at -198(a6) is in
+ * viewing coordinates (fe2.s L3da2e_AtmosphereColNShit dots it against
+ * 122(a3), the planet position in viewing coords), which is the space
+ * the cap normals are built in, so no extra transform is needed.
+ */
+#define HORIZON_CAP_RINGS	64
+#define HORIZON_CAP_SLICES	64
+
+/* Temporary: dump the planet radius/distance the engine hands us, to check
+ * the dome's horizon half-angle against what is on screen. */
+#define PLANET_DEBUG		1
+
+/* The dome is emitted at an arbitrary fixed radius: only the *direction* of
+ * each vertex decides which pixels it covers, and there is no depth buffer
+ * to care about the distance (see draw_3dview). Any value well inside the
+ * frustum will do. */
+#define GROUND_DOME_RADIUS	1.0e6
+
+/* Use the cap below this distance/radius ratio, the full sphere above it.
+ * At d = 2R the cap already covers a 60 degree half-angle, which is well
+ * beyond what the 36.5 degree field of view can show. */
+#define PLANET_CAP_MAX_RATIO	2.0
+
+/* Set while drawing a frame whenever a planet surface is close enough to
+ * be rendered as ground; drives in_atmosphere (see Nu_DrawScreen). */
+static int planet_ground_seen;
+
+static void draw_horizon_cap (const double centre[3], double R, double d,
+			      const float light_dir[3], const int dark[3], const int lit[3])
+{
+	double up[3], e1[3], e2[3];
+	double theta_max, dot, len;
+	int i, j, k;
+
+	/* 'up' points from the planet centre towards the camera (origin) */
+	up[0] = -centre[0]/d;
+	up[1] = -centre[1]/d;
+	up[2] = -centre[2]/d;
+
+	/* any axis not parallel to 'up', made orthonormal to it */
+	if (fabs (up[0]) < 0.9) {
+		e1[0] = 1.0; e1[1] = 0.0; e1[2] = 0.0;
+	} else {
+		e1[0] = 0.0; e1[1] = 1.0; e1[2] = 0.0;
+	}
+	dot = up[0]*e1[0] + up[1]*e1[1] + up[2]*e1[2];
+	e1[0] -= up[0]*dot;
+	e1[1] -= up[1]*dot;
+	e1[2] -= up[2]*dot;
+	len = sqrt (e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2]);
+	e1[0] /= len; e1[1] /= len; e1[2] /= len;
+
+	/* e2 = up x e1 */
+	e2[0] = up[1]*e1[2] - up[2]*e1[1];
+	e2[1] = up[2]*e1[0] - up[0]*e1[2];
+	e2[2] = up[0]*e1[1] - up[1]*e1[0];
+
+	/* Half-angle of the cone of directions that actually hit the surface.
+	 *
+	 * This is NOT acos(R/d), the angular radius of the visible cap seen
+	 * from the planet centre. That form is geometrically correct but
+	 * numerically useless when landed: at an altitude of 0, d == R, so
+	 * acos(R/d) == 0, the cap collapses to a single point and no ground
+	 * gets drawn at all. Seen from the camera the very same surface is a
+	 * cone of half-angle asin(R/d), which is perfectly behaved: at d == R
+	 * it is exactly 90 degrees, i.e. the ground fills everything below the
+	 * true horizontal, which is what standing on a planet looks like. */
+	theta_max = asin (R/d > 1.0 ? 1.0 : R/d);
+
+	glShadeModel (GL_FLAT);
+	/* The cap is an open, convex surface: every screen pixel it covers is
+	 * covered exactly once, so face culling is unnecessary here (and
+	 * would only risk culling the ground away entirely). */
+	glDisable (GL_CULL_FACE);
+
+	/* Walk the rings from the horizon inwards, i.e. far to near: there is
+	 * no depth buffer (see draw_3dview), so anything that could overlap
+	 * must be emitted back to front. A true sphere cap never overlaps
+	 * itself, but our flat chord quads can by a pixel or two right at the
+	 * horizon, where they are almost edge on. */
+	for (i = HORIZON_CAP_RINGS - 1; i >= 0; i--) {
+		double f0 = (double) i / HORIZON_CAP_RINGS;
+		double f1 = (double) (i+1) / HORIZON_CAP_RINGS;
+		/* denser towards theta_max, i.e. towards the horizon line */
+		double t0 = theta_max * (1.0 - (1.0-f0)*(1.0-f0));
+		double t1 = theta_max * (1.0 - (1.0-f1)*(1.0-f1));
+		double c0 = cos (t0), s0 = sin (t0);
+		double c1 = cos (t1), s1 = sin (t1);
+
+		glBegin (GL_QUAD_STRIP);
+		for (j = 0; j <= HORIZON_CAP_SLICES; j++) {
+			double a = 2.0*M_PI*(double) j / HORIZON_CAP_SLICES;
+			double ca = cos (a), sa = sin (a);
+			double v0[3], v1[3], n0[3], n1[3];
+			double disc, l;
+			float nf[3];
+
+			for (k = 0; k < 3; k++) {
+				double tangent = e1[k]*ca + e2[k]*sa;
+				/* -up is 'down', towards the planet centre */
+				v0[k] = -up[k]*c0 + tangent*s0;
+				v1[k] = -up[k]*c1 + tangent*s1;
+			}
+
+			/* Exact ray/sphere hit distance along each direction, so
+			 * the shading normals stay right even though the vertices
+			 * themselves are emitted at an arbitrary radius. Kept in
+			 * double: these are differences of quantities of magnitude
+			 * R, which float cannot resolve for planet-sized radii. */
+			disc = R*R - d*d*s0*s0;
+			if (disc < 0.0) disc = 0.0;
+			l = d*c0 - sqrt (disc);
+			for (k = 0; k < 3; k++) n0[k] = (l*v0[k] - centre[k]) / R;
+
+			disc = R*R - d*d*s1*s1;
+			if (disc < 0.0) disc = 0.0;
+			l = d*c1 - sqrt (disc);
+			for (k = 0; k < 3; k++) n1[k] = (l*v1[k] - centre[k]) / R;
+
+			nf[0] = (float) n0[0];
+			nf[1] = (float) n0[1];
+			nf[2] = (float) n0[2];
+			planet_banded_color (nf, light_dir, dark, lit);
+			glVertex3f ((float) (GROUND_DOME_RADIUS*v0[0]),
+				    (float) (GROUND_DOME_RADIUS*v0[1]),
+				    (float) (GROUND_DOME_RADIUS*v0[2]));
+
+			nf[0] = (float) n1[0];
+			nf[1] = (float) n1[1];
+			nf[2] = (float) n1[2];
+			planet_banded_color (nf, light_dir, dark, lit);
+			glVertex3f ((float) (GROUND_DOME_RADIUS*v1[0]),
+				    (float) (GROUND_DOME_RADIUS*v1[1]),
+				    (float) (GROUND_DOME_RADIUS*v1[2]));
+		}
+		glEnd ();
+	}
+
+	glShadeModel (GL_SMOOTH);
+}
+
 /* not finished by a long shot */
 void Nu_PutPlanet ()
 {
@@ -1671,7 +1923,65 @@ void Nu_DrawPlanet (void **data)
 	znode_rdmatrix (data, rot_matrix);
 
 	//printf ("planet size %d, pos (%d,%d,%d)\n", size,v1[0],v1[1],v1[2]);
-	
+
+	/* Close enough for the surface to be "the ground"? Then draw only the
+	 * visible spherical cap, properly tessellated - see draw_horizon_cap.
+	 * The full sphere below is only usable for planets seen from afar. */
+	{
+		double centre[3], R = (double) size, d, step = 1.0;
+		unsigned int q = (unsigned int) size;
+
+		centre[0] = (double) v1[0];
+		centre[1] = (double) v1[1];
+		centre[2] = (double) v1[2];
+		d = sqrt (centre[0]*centre[0] + centre[1]*centre[1] + centre[2]*centre[2]);
+
+		/* De-quantize the radius.
+		 *
+		 * planet_rad (fe2.s L3ce38) is rebuilt as
+		 *	asr.l d5,d0 ... asl.l d4,d0
+		 * so its low d4 bits are gone: what we get is a multiple of
+		 * 2^d4 and the true radius lies somewhere in [R, R + 2^d4).
+		 * Landed on Mars that is R = 3217 << 17, i.e. a step of 131072,
+		 * while d - R is only 112014 - the whole apparent "altitude"
+		 * fits inside a single quantization step, which is exactly why
+		 * the altimeter reads 0 m yet asin(R/d) came out at 88.68
+		 * instead of 90 degrees and left a band of sky below the
+		 * terrain.
+		 *
+		 * So recover the step from the trailing zero bits and pick the
+		 * value of the interval that is still physically possible: we
+		 * can never be below the surface, so clamp to d. Within the
+		 * radius uncertainty altitude 0 and a very low hover are simply
+		 * indistinguishable, and reading it as "on the surface" is the
+		 * one that never lets sky show through under the ground. */
+		while (q && !(q & 1)) { q >>= 1; step *= 2.0; }
+		if (R + step > d) R = d;
+		else R += step;
+
+		if (R > 0.0 && d > 0.0 && d < R * PLANET_CAP_MAX_RATIO) {
+#if PLANET_DEBUG
+			{
+				static int nframe;
+				if ((nframe++ % 60) == 0) {
+					double s = R/d > 1.0 ? 1.0 : R/d;
+					fprintf (stderr, "[PLANETDBG] R=%.0f step=%.0f d=%.0f d/R=%.8f "
+						 "alpha=%.4fdeg pos=(%d,%d,%d)\n",
+						 R, step, d, d/R, asin (s)*180.0/M_PI,
+						 v1[0], v1[1], v1[2]);
+				}
+			}
+#endif
+			/* We are close enough to a planet that its surface is the
+			 * ground under us - that is exactly the condition for the
+			 * sky backdrop too, so derive it from here rather than
+			 * from a game flag. Picked up by the next frame. */
+			planet_ground_seen = 1;
+			draw_horizon_cap (centre, R, d, light_dir, dark, lit);
+			return;
+		}
+	}
+
 	glPushMatrix ();
 	glTranslatef (v1[0], v1[1], v1[2]);
 	glRotatef (180.0f, 1, 0, 0);
@@ -1831,10 +2141,6 @@ void Nu_DrawOval (void **data)
 	 * slightly translucent tint typical of planetary rings instead of
 	 * the previous solid black. */
 	glEnable (GL_BLEND);
-	/* Translucent surfaces shouldn't write to the depth buffer (only
-	 * test against it), otherwise they can wrongly occlude things drawn
-	 * after them that are actually behind their bounding geometry. */
-	glDepthMask (GL_FALSE);
 	glColor4ub (200, 190, 170, 160);
 
 	glPushMatrix ();
@@ -1845,7 +2151,6 @@ void Nu_DrawOval (void **data)
 	 * body it surrounds. */
 	gluDisk (qobj, rad * 0.6, rad, 48, 1);
 	glPopMatrix ();
-	glDepthMask (GL_TRUE);
 	glDisable (GL_BLEND);
 }
 
@@ -2012,6 +2317,12 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_Draw2DLine
 };
 
+/*
+ * Primitives inside a znode are already in the exact order the engine
+ * wants them painted (hull face first, then the decals that lie on it:
+ * logos, panels, vector text, complex shape fills...). Just replay that
+ * order - see draw_3dview for why there is no depth test to fight with.
+ */
 static void Nu_DrawPrimitive (void *data)
 {
 	int fnum;
@@ -2030,17 +2341,28 @@ static void Nu_DrawPrimitive (void *data)
  *
  * Draw this crap starting from biggest value znodes.
  *
- * The z ordering BETWEEN nodes still comes purely from this tree walk
- * (painter's algorithm on the game-supplied zval, not real 3D distance -
- * some primitives, e.g. distant backdrop/cloud layers, are deliberately
- * given small/arbitrary vertex Z regardless of their intended "far away"
- * zval, so trusting a single global depth buffer across *all* nodes
- * makes far-away things wrongly occlude near ones). Real GL depth
- * testing is only applied *within* a single node's own primitive(s), by
- * clearing the depth buffer before each node: that fixes local
- * self-intersection between primitives batched into the same node (e.g.
- * interleaved ground quads/triangles from the same terrain chunk)
- * without disturbing the coarse inter-node order that already worked.
+ * NO DEPTH BUFFER IS USED HERE, on purpose. This engine is a painter's
+ * algorithm engine: fe2.s sorts every single primitive into a z tree
+ * (L38594_InsertIntoZTree, mirrored here by Nu_InsertZNode) and paints
+ * back to front. The software renderer has no depth buffer at all and
+ * gets the right picture, so we get it the same way.
+ *
+ * This used to glClear(GL_DEPTH_BUFFER_BIT) before every node with the
+ * depth test on. That was worse than useless: Nu_InsertZNode allocates
+ * one node per primitive, so the depth buffer was wiped between
+ * primitives and never actually compared two of them - it only ever
+ * applied *within* a node, which is exactly where the engine emits
+ * deliberately coplanar decals (ship logos, panels, vector text, complex
+ * shape fills) on top of the face they belong to. Those are ties, so
+ * they fought and dropped out at random no matter how much depth
+ * precision we threw at it. Removing the depth test makes z-fighting
+ * impossible by construction, and drops thousands of full screen depth
+ * clears per frame.
+ *
+ * Note the zvals are NOT real 3D distances: some primitives (distant
+ * backdrops, cloud layers) get small/arbitrary vertex Z regardless of
+ * their intended "far away" zval, which is another reason a global depth
+ * buffer cannot work here.
  */
 static void draw_3dview (struct ZNode *node)
 {
@@ -2049,7 +2371,6 @@ static void draw_3dview (struct ZNode *node)
 	
 	if (use_renderer) {
 		//fprintf (stderr, "Z=%d ", node->z);
-		glClear (GL_DEPTH_BUFFER_BIT);
 		Nu_DrawPrimitive (node->data);
 	}
 
@@ -2066,65 +2387,15 @@ static void set_gl_clear_col (int rgb)
 }
 
 /*
- * Approximate sky/ground backdrop for atmosphere flight.
+ * There is deliberately no backdrop drawing here.
  *
- * The real horizon rendering lives entirely in the ST software renderer's
- * own primitive-list interpreter (see fe2.s: Fn_Draw3DView), which is
- * skipped outright when the GL renderer is active and was never given a
- * GL-side replacement. Precisely replicating it would need a dedicated
- * new hostcall + a matching change to fe2.s. As a reasonable first cut
- * that doesn't touch the 68k code at all, draw a two-tone vertical
- * gradient (sky above the horizon, ground below) using the one colour
- * value we do have every frame (fe2_bgcol, set by Call_Memset/
- * Call_MemsetBlue) instead of a single flat glClearColor.
+ * Nothing paints the backdrop under GL: Fn_Draw3DView, the engine's 2D
+ * primitive-list interpreter, is skipped outright (tst.w gl_renderer_on /
+ * bne.s l385c0), and the full width spans the software renderer uses for
+ * the sky bands (Call_FillLine) are never issued. The flat sky colour left
+ * by glClear(MainRGBPalette[fe2_bgcol]) is all we get, so the ground has to
+ * come from the planet primitive itself - see draw_ground_dome.
  */
-static void draw_atmosphere_backdrop (void)
-{
-	unsigned int horizon = MainRGBPalette[fe2_bgcol];
-	float hr = (horizon & 0xff) / 255.0f;
-	float hg = ((horizon >> 8) & 0xff) / 255.0f;
-	float hb = ((horizon >> 16) & 0xff) / 255.0f;
-	/* zenith: darker/richer version of the horizon colour */
-	float zr = hr * 0.35f, zg = hg * 0.35f, zb = hb * 0.55f;
-	/* ground: warm tone blended with the horizon colour, so it stays
-	 * thematically consistent with whatever the sky is doing */
-	float gr = hr*0.5f + 0.425f, gg = hg*0.5f + 0.225f, gb = hb*0.5f + 0.275f;
-
-	glDisable (GL_DEPTH_TEST);
-	glMatrixMode (GL_PROJECTION);
-	glPushMatrix ();
-	glLoadIdentity ();
-	glOrtho (0, 320, 0, 200, -1, 1);
-	glMatrixMode (GL_MODELVIEW);
-	glPushMatrix ();
-	glLoadIdentity ();
-
-	/* sky: zenith (top) -> horizon colour (middle) */
-	glBegin (GL_QUADS);
-		glColor3f (zr, zg, zb);
-		glVertex2i (0, 200);
-		glVertex2i (320, 200);
-		glColor3f (hr, hg, hb);
-		glVertex2i (320, 100);
-		glVertex2i (0, 100);
-	glEnd ();
-
-	/* ground: horizon colour (middle) -> ground tone (bottom) */
-	glBegin (GL_QUADS);
-		glColor3f (hr, hg, hb);
-		glVertex2i (0, 100);
-		glVertex2i (320, 100);
-		glColor3f (gr, gg, gb);
-		glVertex2i (320, 0);
-		glVertex2i (0, 0);
-	glEnd ();
-
-	glMatrixMode (GL_PROJECTION);
-	glPopMatrix ();
-	glMatrixMode (GL_MODELVIEW);
-	glPopMatrix ();
-	glEnable (GL_DEPTH_TEST);
-}
 
 void Nu_DrawScreen ()
 {
@@ -2132,14 +2403,12 @@ void Nu_DrawScreen ()
 	_BuildRGBPalette (MainRGBPalette, MainPalette, len_main_palette);
 	_BuildRGBPalette (CtrlRGBPalette, CtrlPalette, 16);
 	
-	if (in_atmosphere && use_renderer != R_GLWIRE) {
-		draw_atmosphere_backdrop ();
-	}
-	
 	//fprintf (stderr, "Render: ");
 	if (znode_cur) end_node ();
 	//printf ("Frame: %d znodes.\n", znode_buf_pos);
+	planet_ground_seen = 0;
 	draw_3dview (znode_start);
+	in_atmosphere = planet_ground_seen;
 	//fprintf (stderr, "\n");
 
 #if PRIM_DEBUG
