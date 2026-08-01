@@ -6,3 +6,4 @@ gen
 dis68k
 .DS_Store
 build/*
+build
