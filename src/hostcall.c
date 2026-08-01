@@ -62,17 +62,6 @@ static void sky_debug_frame_end (void)
 
 	frame++;
 	if ((frame % 30) == 0) {
-		fprintf (stderr,
-			"[SKYDBG] renderer=%s bgcol=$%x | memset old=%d gl=%d | "
-			"memsetblue old=%d gl=%d | hline=%d oldhline=%d backhline=%d "
-			"fillline=%d putpix=%d blitbmp=%d | scr range=[0x%x,0x%x] "
-			"col255_writes=%d\n",
-			use_renderer == R_OLD ? "OLD" : "GL", fe2_bgcol,
-			sky_stats.memset_old, sky_stats.memset_gl,
-			sky_stats.memsetblue_old, sky_stats.memsetblue_gl,
-			sky_stats.hline, sky_stats.oldhline, sky_stats.backhline,
-			sky_stats.fillline, sky_stats.putpix, sky_stats.blitbmp,
-			sky_stats.scr_min, sky_stats.scr_max, sky_stats.col255_writes);
 		memset (&sky_stats, 0, sizeof (sky_stats));
 	}
 }

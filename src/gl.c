@@ -35,62 +35,6 @@ unsigned int CtrlRGBPalette[16];
 
 unsigned long logscreen, logscreen2, physcreen, physcreen2;
 
-/* ---- TEMPORARY DEBUG INSTRUMENTATION --------------------------------
- * Continuation of the investigation in src/hostcall.c (SKY_DEBUG): the
- * hostcall.c logs proved that Nu_Put* hostcalls do still fire in GL mode,
- * so the question now is what colour data quads/triangles (candidates
- * for drawing ground/terrain) actually carry when flying in atmosphere.
- * Prints one summary line every ~30 frames. Safe to remove: delete this
- * block plus the PRIM_DEBUG_HIT() call sites in Nu_DrawQuad/Nu_DrawTriangle
- * and the prim_debug_frame_end() call in Nu_DrawScreen. */
-#define PRIM_DEBUG 1
-
-#if PRIM_DEBUG
-struct prim_debug_stats {
-	int quad_count, tri_count;
-	int quad_r_min, quad_r_max, quad_g_min, quad_g_max, quad_b_min, quad_b_max;
-	int tri_r_min, tri_r_max, tri_g_min, tri_g_max, tri_b_min, tri_b_max;
-};
-static struct prim_debug_stats prim_stats = {
-	0, 0, 999, -1, 999, -1, 999, -1, 999, -1, 999, -1, 999, -1
-};
-
-#define PRIM_DEBUG_HIT(kind, r, g, b) do { \
-	prim_stats.kind##_count++; \
-	if ((r) < prim_stats.kind##_r_min) prim_stats.kind##_r_min = (r); \
-	if ((r) > prim_stats.kind##_r_max) prim_stats.kind##_r_max = (r); \
-	if ((g) < prim_stats.kind##_g_min) prim_stats.kind##_g_min = (g); \
-	if ((g) > prim_stats.kind##_g_max) prim_stats.kind##_g_max = (g); \
-	if ((b) < prim_stats.kind##_b_min) prim_stats.kind##_b_min = (b); \
-	if ((b) > prim_stats.kind##_b_max) prim_stats.kind##_b_max = (b); \
-} while (0)
-
-static void prim_debug_frame_end (void)
-{
-	static int frame;
-
-	frame++;
-	if ((frame % 30) == 0) {
-		fprintf (stderr,
-			"[PRIMDBG] quad=%d rgb=[%d-%d,%d-%d,%d-%d] | tri=%d rgb=[%d-%d,%d-%d,%d-%d]\n",
-			prim_stats.quad_count,
-			prim_stats.quad_r_min, prim_stats.quad_r_max,
-			prim_stats.quad_g_min, prim_stats.quad_g_max,
-			prim_stats.quad_b_min, prim_stats.quad_b_max,
-			prim_stats.tri_count,
-			prim_stats.tri_r_min, prim_stats.tri_r_max,
-			prim_stats.tri_g_min, prim_stats.tri_g_max,
-			prim_stats.tri_b_min, prim_stats.tri_b_max);
-		prim_stats.quad_count = prim_stats.tri_count = 0;
-		prim_stats.quad_r_min = prim_stats.quad_g_min = prim_stats.quad_b_min = 999;
-		prim_stats.quad_r_max = prim_stats.quad_g_max = prim_stats.quad_b_max = -1;
-		prim_stats.tri_r_min = prim_stats.tri_g_min = prim_stats.tri_b_min = 999;
-		prim_stats.tri_r_max = prim_stats.tri_g_max = prim_stats.tri_b_max = -1;
-	}
-}
-#endif /* PRIM_DEBUG */
-/* ---- END TEMPORARY DEBUG INSTRUMENTATION ---------------------------- */
-
 
 static SDL_Surface *sdlscrn;                             /* The SDL screen surface */
 BOOL bGrabMouse = FALSE;                          /* Grab the mouse cursor in the window */
@@ -1447,9 +1391,6 @@ void Nu_DrawTriangle (void **data)
 	znode_rdvertexf (data, v3);
 	znode_rdcolorv (data, rgb);
 	glColor3ub (rgb[0], rgb[1], rgb[2]);
-#if PRIM_DEBUG
-	PRIM_DEBUG_HIT (tri, rgb[0], rgb[1], rgb[2]);
-#endif
 	if (use_renderer == R_GLWIRE) {
 		glBegin (GL_LINE_STRIP);
 			glVertex3fv (v1);
@@ -1488,9 +1429,6 @@ void Nu_DrawQuad (void **data)
 	znode_rdcolor (data, &r, &g, &b);
 	
 	glColor3ub (r, g, b);
-#if PRIM_DEBUG
-	PRIM_DEBUG_HIT (quad, r, g, b);
-#endif
 	if (use_renderer == R_GLWIRE) {
 		glBegin (GL_LINE_STRIP);
 			glVertex3iv (v1);
@@ -1960,18 +1898,6 @@ void Nu_DrawPlanet (void **data)
 		else R += step;
 
 		if (R > 0.0 && d > 0.0 && d < R * PLANET_CAP_MAX_RATIO) {
-#if PLANET_DEBUG
-			{
-				static int nframe;
-				if ((nframe++ % 60) == 0) {
-					double s = R/d > 1.0 ? 1.0 : R/d;
-					fprintf (stderr, "[PLANETDBG] R=%.0f step=%.0f d=%.0f d/R=%.8f "
-						 "alpha=%.4fdeg pos=(%d,%d,%d)\n",
-						 R, step, d, d/R, asin (s)*180.0/M_PI,
-						 v1[0], v1[1], v1[2]);
-				}
-			}
-#endif
 			/* We are close enough to a planet that its surface is the
 			 * ground under us - that is exactly the condition for the
 			 * sky backdrop too, so derive it from here rather than
