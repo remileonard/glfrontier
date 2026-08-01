@@ -27,7 +27,7 @@
      1   59  60  61  62    63  64  65  66    67  68  87  88                70     69
 
 
-¬  !   "   £   $   %   ^   &   *   (   )   _   +                                 Page
+ï¿½  !   "   ï¿½   $   %   ^   &   *   (   )   _   +                                 Page
 `  1   2   3   4   5   6   7   8   9   0   -   =   <-               Ins   Home    Up
 
 41 2   3   4   5   6   7   8   9   10  11  12  13  14               82     71     73
@@ -433,7 +433,7 @@ static int Keymap_FindScanCodeOffset(SDL_keysym* keysym)
 */
 static char Keymap_PcToStScanCode(SDL_keysym* keysym)
 {
-  static int offset = -1;    /* uninitialized scancode offset */
+  int offset = -1;    /* uninitialized scancode offset */
 
   switch(keysym->sym)
   {
@@ -566,7 +566,7 @@ char Keymap_RemapKeyToSTScanCode(SDL_keysym* pKeySym)
     {
       pKeySym->scancode = SdlSymToSdlScan[pKeySym->sym];
       if(pKeySym->scancode == 0)
-        fprintf(stderr, "Warning: Key scancode is 0!\n");
+        fprintf(stderr, "Warning: Key scancode is 0! sym %d\n",pKeySym->sym);
     }
 
     return Keymap_PcToStScanCode(pKeySym);
