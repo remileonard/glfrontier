@@ -29,43 +29,7 @@
 #include "screen.h"
 #include "audio.h"
 
-/* ---- TEMPORARY DEBUG INSTRUMENTATION --------------------------------
- * Added to investigate why the GL renderer doesn't show the sky/horizon
- * gradient that the software renderer draws while flying in atmosphere.
- * Prints one summary line every ~30 frames (roughly twice a second).
- * Safe to remove once the investigation is done - just delete everything
- * guarded by SKY_DEBUG, plus the sky_debug_track()/SKY_DEBUG_HIT() call
- * sites in Call_Memset, Call_MemsetBlue, Call_PutPix, Call_FillLine,
- * Call_BackHLine, Call_OldHLine, Call_HLine and Call_SetScreenBase. */
-#define SKY_DEBUG 1
 
-#if SKY_DEBUG
-struct sky_debug_stats {
-	int memset_old, memset_gl;
-	int memsetblue_old, memsetblue_gl;
-	int hline, oldhline, backhline, fillline, putpix, blitbmp;
-	int col255_writes;
-	int scr_min, scr_max;
-};
-static struct sky_debug_stats sky_stats;
-
-static void sky_debug_track (int scr, int col)
-{
-	if (sky_stats.scr_min == 0 || scr < sky_stats.scr_min) sky_stats.scr_min = scr;
-	if (scr > sky_stats.scr_max) sky_stats.scr_max = scr;
-	if ((col & 0xff) == 255) sky_stats.col255_writes++;
-}
-
-static void sky_debug_frame_end (void)
-{
-	static int frame;
-
-	frame++;
-	if ((frame % 30) == 0) {
-		memset (&sky_stats, 0, sizeof (sky_stats));
-	}
-}
-#endif /* SKY_DEBUG */
 /* ---- END TEMPORARY DEBUG INSTRUMENTATION ---------------------------- */
 #include "input.h"
 #include "keymap.h"
@@ -123,14 +87,8 @@ void Call_Memset ()
 	
 	if (use_renderer == R_OLD) {
 		memset (STRam+adr, 0, count);
-#if SKY_DEBUG
-		sky_stats.memset_old++;
-#endif
 	} else {
 		memset (STRam+adr, 255, count);
-#if SKY_DEBUG
-		sky_stats.memset_gl++;
-#endif
 	}
 	fe2_bgcol = 0;
 }
@@ -147,14 +105,8 @@ void Call_MemsetBlue ()
 	adr = STMemory_ReadLong (Params+SIZE_WORD+SIZE_LONG);
 	if (use_renderer == R_OLD) {
 		memset (STRam+adr, 0xe, count);
-#if SKY_DEBUG
-		sky_stats.memsetblue_old++;
-#endif
 	} else {
 		memset (STRam+adr, 255, count);
-#if SKY_DEBUG
-		sky_stats.memsetblue_gl++;
-#endif
 	}
 	fe2_bgcol = 0xe;
 }
@@ -288,10 +240,6 @@ void Call_PutPix ()
 	}
 	pix = (char *)STRam + scr + org_x;
 	*pix = col;
-#if SKY_DEBUG
-	sky_stats.putpix++;
-	sky_debug_track (scr+org_x, col);
-#endif
 	return;
 }
 
@@ -328,10 +276,6 @@ void Call_FillLine ()
 		*pix = col;
 		pix++;
 	}
-#if SKY_DEBUG
-	sky_stats.fillline++;
-	sky_debug_track (scr, col);
-#endif
 }
 
 /*
@@ -376,10 +320,6 @@ void Call_BackHLine ()
 		if ((bitfield & (1<<i)) && (*pix == 0)) *pix = col;
 		pix++;
 	}
-#if SKY_DEBUG
-	sky_stats.backhline++;
-	sky_debug_track (scr, col);
-#endif
 }
 
 void Call_OldHLine ()
@@ -417,10 +357,6 @@ void Call_OldHLine ()
 		*pix = col;
 		pix++;
 	}
-#if SKY_DEBUG
-	sky_stats.oldhline++;
-	sky_debug_track (scr+org_x, col);
-#endif
 }
 
 void Call_HLine ()
@@ -439,10 +375,6 @@ void Call_HLine ()
 		*pix = col;
 		pix++;
 	}
-#if SKY_DEBUG
-	sky_stats.hline++;
-	sky_debug_track (scr+org_x, col);
-#endif
 }
 
 /*
@@ -631,10 +563,6 @@ void Call_SetScreenBase ()
 	
 	VideoBase = STMemory_ReadLong (Params+SIZE_WORD);
 	VideoRaster = STRam + VideoBase;
-
-#if SKY_DEBUG
-	sky_debug_frame_end ();
-#endif
 
 	for (i=0; i<len_working_ext_pal; i++) {
 		MainPalette[16+i] = working_ext_pal[i];
