@@ -53,7 +53,6 @@ extern void Screen_Init(void);
 extern void Screen_UnInit(void);
 extern void Screen_ToggleFullScreen (void);
 extern void Screen_ToggleRenderer ();
-
 extern void Nu_PutComplexStart ();
 extern void Nu_PutTriangle ();
 extern void Nu_PutQuad ();

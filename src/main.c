@@ -28,7 +28,6 @@
 
 #define FORCE_WORKING_DIR                 /* Set default directory to cwd */
 
-
 BOOL bQuitProgram=FALSE;                  /* Flag to quit program cleanly */
 BOOL bUseFullscreen=FALSE;
 BOOL bEmulationActive=TRUE;               /* Run emulation when started */
@@ -110,6 +109,11 @@ void Main_EventHandler()
   while (SDL_PollEvent (&event))
    switch( event.type )
    {
+    case SDL_VIDEORESIZE:  
+      screen_w = event.resize.w;
+      screen_h = event.resize.h;
+      Screen_Init();
+      break;
     case SDL_QUIT:
        bQuitProgram = TRUE;
        SDL_Quit ();

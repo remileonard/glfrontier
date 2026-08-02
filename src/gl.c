@@ -129,7 +129,7 @@ static void change_vidmode ()
 	 * painter's algorithm, exactly like the software renderer. See
 	 * draw_3dview. */
 	
-	modes = SDL_OPENGL | SDL_ANYFORMAT | (bInFullScreen ? SDL_FULLSCREEN : 0);
+	modes = SDL_OPENGL | SDL_ANYFORMAT | SDL_RESIZABLE | (bInFullScreen ? SDL_FULLSCREEN : 0);
 	
 	if ((sdlscrn = SDL_SetVideoMode (screen_w, screen_h,
 				info->vfmt->BitsPerPixel, modes)) == 0) {
