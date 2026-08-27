@@ -48258,6 +48258,22 @@ L725ba:
 		rts
 
 L725d4_SetDetailOpts:
+		* GL rendering has none of the CPU/rasterizer limits the stock
+		* "shape detail" option was tuned around on the Atari ST, so
+		* always use the best (very high) preset while it is active,
+		* rather than whatever level of detail the player has picked
+		* (or the game's own low-detail default - see
+		* L7228e_opts_defaults). This is the only thing that gated how
+		* much planet surface detail/decor was generated at a distance;
+		* the values below are exactly the existing "very high" preset,
+		* so nothing new or unproven is exercised.
+		tst.w	gl_renderer_on
+		beq.s	l725e2_stock_detail
+		moveq	#-2,d1
+		moveq	#-4,d2
+		move.w	#$4200,d3
+		bra.w	l72608
+	l725e2_stock_detail:
 		move.l	A6_opt_shape_detail(a6),d0
 		moveq	#-2,d1
 		moveq	#-4,d2
