@@ -48269,6 +48269,7 @@ L725d4_SetDetailOpts:
 		* so nothing new or unproven is exercised.
 		tst.w	gl_renderer_on
 		beq.s	l725e2_stock_detail
+		move.l	A6_opt_shape_detail(a6),d0
 		moveq	#-2,d1
 		moveq	#-4,d2
 		move.w	#$4200,d3
