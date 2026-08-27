@@ -1562,18 +1562,23 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
 	out[2] = rot_matrix[2]*fx + rot_matrix[6]*fy + rot_matrix[10]*fz;
 }
 
-/* fe2.s does carry a per-planet surface/continent pattern - see
+/* fe2.s carries a per-planet surface/continent pattern - see
  * L3cd9c_ProjectPlanet's L3d452_PlanetFeatureLoop, which walks a per-planet
  * list of feature points and plots them as small line segments in a
- * "continent" grey (L3ddc0/L3dec8, "move.l #$777,d7" and friends). But that
- * whole path bypasses every Nu_Put* hostcall we can hook into: it projects
- * points and clips lines by hand straight onto the ST's own 2D screen
- * buffer (L3ddc4's Cohen-Sutherland-style clip against L3de18), so none of
- * that per-planet feature geometry is reachable from the GL side - Nu_
- * PutPlanet only ever gives us a size, position, rotation and two colours.
+ * "continent" grey (L3ddc0/L3dec8, "move.l #$777,d7" and friends). That
+ * path used to bypass every Nu_Put* hostcall we could hook into: it
+ * projects points and clips lines by hand straight onto the ST's own 2D
+ * screen buffer (L3ddc4's Cohen-Sutherland-style clip against L3de18).
  *
- * So instead of leaving the surface a flat colour band, we reconstruct the
- * *effect* procedurally: a seamless 3D value-noise field evaluated directly
+ * Two dedicated hcalls, Nu_PutPlanetFeatureStart/Nu_PutPlanetFeature (see
+ * below), now capture that per-planet feature vertex list before fe2.s
+ * projects/clips it, so the real coastline geometry is drawn as actual
+ * line segments from Nu_DrawPlanet (see draw_planet_features).
+ *
+ * The rest of the surface still doesn't have per-pixel land/sea shading
+ * data available (Nu_PutPlanet only ever gives us a size, position,
+ * rotation and two colours), so we still approximate the *look* of that
+ * shading procedurally: a seamless 3D value-noise field evaluated directly
  * on the sphere's surface normal (no UV seams/pole pinching), thresholded
  * into continent-shaped patches, tinted with the same grey (0x777) the
  * original code uses for its feature points. The noise is seeded from the

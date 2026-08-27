@@ -1101,5 +1101,6 @@ HOSTCALL hcalls[] = {
 	not_available,
 	not_available,
 	not_available,
+	not_available,
 #endif
 };
