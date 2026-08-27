@@ -61,6 +61,8 @@ Nu_PutCylinder		equ	$76
 Nu_PutBlob		equ	$77
 Nu_PutPlanet		equ	$78
 Nu_Draw2DLine		equ	$79
+Nu_PutPlanetFeatureStart	equ	$7a
+Nu_PutPlanetFeature	equ	$7b
 
 * don't change. it won't work yet.
 SCR_W			equ	320
@@ -17081,10 +17083,19 @@ L3d452_PlanetFeatureLoop:
 		bhi.w	L3d452_PlanetFeatureLoop
 		move.w	#$ffff,188(a3)
 		bra.w	L3d452_PlanetFeatureLoop
-	l3d4fe:	bsr.w	L3e036
+	l3d4fe:
+		* d3/d4/d5 = raw (pre-rotation) local model-space vertex of
+		* the new contour/chain start point. hcall is read-only
+		* (never calls SetReg) so it is a no-op for R_OLD.
+		hcall	#Nu_PutPlanetFeatureStart
+		bsr.w	L3e036
 		move.w	#$ffff,34(a3)
 		bra.s	l3d50e
-	l3d50a:	move.l	#$777,d7
+	l3d50a:
+		* d3/d4/d5 = raw (pre-rotation) local model-space vertex to
+		* connect to the previous contour point.
+		hcall	#Nu_PutPlanetFeature
+		move.l	#$777,d7
 		bsr.w	L3ddc0
 	l3d50e:	move.b	(a5)+,d3
 		bne.w	l3d454_again_again
