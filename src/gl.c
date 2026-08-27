@@ -1673,6 +1673,14 @@ static void planet_banded_color (const float n_world[3], const float light_dir[3
 	g += land * (PLANET_LAND_TINT_G - g);
 	b += land * (PLANET_LAND_TINT_B - b);
 
+	/* dark[]/lit[] ultimately come from split_rgb444b() so they are
+	 * always within [0,255], but clamp anyway: floating point rounding
+	 * could otherwise nudge a channel a hair outside that range and wrap
+	 * around when cast to GLubyte. */
+	if (r < 0.0f) r = 0.0f; else if (r > 255.0f) r = 255.0f;
+	if (g < 0.0f) g = 0.0f; else if (g > 255.0f) g = 255.0f;
+	if (b < 0.0f) b = 0.0f; else if (b > 255.0f) b = 255.0f;
+
 	glColor3ub ((GLubyte) r, (GLubyte) g, (GLubyte) b);
 }
 
@@ -1937,7 +1945,7 @@ void Nu_DrawPlanet (void **data)
 	seed = ((unsigned int) obj_col_raw * 2654435761u)
 		^ ((unsigned int) light_col_raw * 40503u)
 		^ (unsigned int) size;
-	
+
 	znode_rdvertexf (data, light_vec);
 	light_vec[3] = 0.0f;
 
