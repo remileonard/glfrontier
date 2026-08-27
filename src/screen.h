@@ -80,6 +80,8 @@ extern void Nu_PutCylinder ();
 extern void Nu_PutBlob ();
 extern void Nu_PutPlanet ();
 extern void Nu_Put2DLine ();
+extern void Nu_PutPlanetFeatureStart ();
+extern void Nu_PutPlanetFeature ();
 
 extern int screen_w;
 extern int screen_h;

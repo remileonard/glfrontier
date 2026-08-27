@@ -744,6 +744,8 @@ enum NuPrimitive {
 	NU_OVALTHINGY,
 	NU_POINT,
 	NU_2DLINE,
+	NU_PLANETFEATURESTART,
+	NU_PLANETFEATURE,
 	NU_MAX
 };
 
@@ -1583,6 +1585,85 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
 #define PLANET_LAND_TINT_B	112
 #define PLANET_LAND_MIX		0.45f
 
+/*
+ * Real continent/coastline geometry.
+ *
+ * fe2.s's L3d452_PlanetFeatureLoop walks the planet's actual feature
+ * (coastline) vertex list and draws it as connected line segments directly
+ * into the ST's own 2D framebuffer, bypassing every other Nu_Put* hcall -
+ * so this geometry was previously unreachable from here. Two new hcalls,
+ * Nu_PutPlanetFeatureStart ("moveto", starts a new contour) and
+ * Nu_PutPlanetFeature ("lineto", connects to the previous vertex of the
+ * current contour), are emitted right before the vertex is projected
+ * on-screen, i.e. while d3/d4/d5 still hold the *raw, pre-rotation* local
+ * model-space direction (see the "rotate!" block in fe2.s immediately
+ * following - it only ever touches d0/d1/d2/d6). Capturing the
+ * pre-rotation vector (rather than the already-rotated d0/d1/d2) is
+ * essential: draw_banded_sphere()'s icosphere vertices are also local,
+ * pre-rotation directions that get rotated exactly once by rot_matrix via
+ * glMultMatrixf() in Nu_DrawPlanet's matrix stack - rotating an
+ * already-rotated vertex a second time would misalign the coastlines
+ * against the sphere.
+ *
+ * These hcalls fire while fe2.s is still assembling the planet's feature
+ * list, *before* it reaches fuck_planet's hcall #Nu_PutPlanet, so in the
+ * znode's serialized data stream the NU_PLANETFEATURESTART/NU_PLANETFEATURE
+ * entries always precede that planet's NU_PLANET entry. We therefore just
+ * buffer the vertices as they are read back (Nu_DrawPlanetFeature*) and
+ * flush/draw them from within Nu_DrawPlanet itself, once the planet's own
+ * transform (position + rotation matrix) is known. */
+#define MAX_PLANET_FEATURE_VERTS	16384
+static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
+static char planet_feature_newchain[MAX_PLANET_FEATURE_VERTS];
+static int planet_feature_count;
+
+static void planet_feature_push (int rawx, int rawy, int rawz, int newchain)
+{
+	float x, y, z, len;
+
+	if (planet_feature_count >= MAX_PLANET_FEATURE_VERTS) return;
+
+	x = (float) rawx;
+	y = (float) rawy;
+	z = (float) rawz;
+	len = sqrt (x*x + y*y + z*z);
+	if (len > 0.0001f) {
+		x /= len; y /= len; z /= len;
+	} else {
+		x = 0.0f; y = 0.0f; z = 1.0f;
+	}
+
+	planet_feature_dir[planet_feature_count][0] = x;
+	planet_feature_dir[planet_feature_count][1] = y;
+	planet_feature_dir[planet_feature_count][2] = z;
+	planet_feature_newchain[planet_feature_count] = newchain;
+	planet_feature_count++;
+}
+
+/* Draws the buffered coastline vertices as connected line segments and
+ * clears the buffer - call from inside the same glPushMatrix/glTranslatef/
+ * glRotatef/glMultMatrixf block used for the planet's sphere, so the lines
+ * are transformed exactly like draw_banded_sphere()'s mesh vertices. */
+static void draw_planet_features (float size)
+{
+	int i;
+
+	if (planet_feature_count < 2) { planet_feature_count = 0; return; }
+
+	glColor3ub (PLANET_LAND_TINT_R, PLANET_LAND_TINT_G, PLANET_LAND_TINT_B);
+	glLineWidth (2.0f);
+	glBegin (GL_LINES);
+	for (i = 1; i < planet_feature_count; i++) {
+		if (planet_feature_newchain[i]) continue;
+		glVertex3f (planet_feature_dir[i-1][0]*size, planet_feature_dir[i-1][1]*size, planet_feature_dir[i-1][2]*size);
+		glVertex3f (planet_feature_dir[i][0]*size, planet_feature_dir[i][1]*size, planet_feature_dir[i][2]*size);
+	}
+	glEnd ();
+	glLineWidth (1.0f);
+
+	planet_feature_count = 0;
+}
+
 static unsigned int planet_hash_u (int x, int y, int z, unsigned int seed)
 {
 	unsigned int h = seed;
@@ -1896,6 +1977,49 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 	glShadeModel (GL_SMOOTH);
 }
 
+/* Real coastline geometry capture (see planet_feature_push above): d3/d4/d5
+ * are only ever written a word at a time in fe2.s (move.b + asl.w #8), so
+ * the upper 16 bits of the register are stale/unrelated - sign-extend from
+ * the low word rather than using the raw 32-bit GetReg() value. */
+static inline int reg_word_s16 (int reg)
+{
+	return (int) (short) GetReg (reg);
+}
+
+void Nu_PutPlanetFeatureStart ()
+{
+	if (use_renderer == R_OLD) return;
+	znode_wrlong (NU_PLANETFEATURESTART);
+	znode_wrlong (reg_word_s16 (REG_D3));
+	znode_wrlong (reg_word_s16 (REG_D4));
+	znode_wrlong (reg_word_s16 (REG_D5));
+}
+void Nu_DrawPlanetFeatureStart (void **data)
+{
+	int x, y, z;
+	x = znode_rdlong (data);
+	y = znode_rdlong (data);
+	z = znode_rdlong (data);
+	planet_feature_push (x, y, z, 1);
+}
+
+void Nu_PutPlanetFeature ()
+{
+	if (use_renderer == R_OLD) return;
+	znode_wrlong (NU_PLANETFEATURE);
+	znode_wrlong (reg_word_s16 (REG_D3));
+	znode_wrlong (reg_word_s16 (REG_D4));
+	znode_wrlong (reg_word_s16 (REG_D5));
+}
+void Nu_DrawPlanetFeature (void **data)
+{
+	int x, y, z;
+	x = znode_rdlong (data);
+	y = znode_rdlong (data);
+	z = znode_rdlong (data);
+	planet_feature_push (x, y, z, 0);
+}
+
 /* not finished by a long shot */
 void Nu_PutPlanet ()
 {
@@ -2018,6 +2142,11 @@ void Nu_DrawPlanet (void **data)
 			 * from a game flag. Picked up by the next frame. */
 			planet_ground_seen = 1;
 			draw_horizon_cap (centre, R, d, light_dir, dark, lit, seed);
+			/* Not drawn from this close-up "standing on the ground"
+			 * view (the coastline silhouette only makes sense seen
+			 * from afar); discard so it doesn't leak into the next
+			 * planet's feature list. */
+			planet_feature_count = 0;
 			return;
 		}
 	}
@@ -2031,6 +2160,10 @@ void Nu_DrawPlanet (void **data)
 	glEnable (GL_CULL_FACE);
 	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit, seed);
 	glDisable (GL_CULL_FACE);
+	/* Real coastline geometry, captured via Nu_PutPlanetFeatureStart/
+	 * Nu_PutPlanetFeature. Drawn very slightly above the sphere's own
+	 * radius so the lines don't z-fight with the sphere surface. */
+	draw_planet_features ((float) size * 1.002f);
 	glPopMatrix ();
 }
 
@@ -2354,7 +2487,9 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_DrawBlob,
 	&Nu_DrawOval,
 	&Nu_DrawPoint,
-	&Nu_Draw2DLine
+	&Nu_Draw2DLine,
+	&Nu_DrawPlanetFeatureStart,
+	&Nu_DrawPlanetFeature
 };
 
 /*
