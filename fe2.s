@@ -22861,14 +22861,15 @@ stat_fps:	ds.w	1
 show_stats:	dc.w	0
 gl_renderer_on:	dc.w	1
 
-* Minimum on-screen planet size (see 120(a3) in L3cd9c_ProjectPlanet) below
-* which individual surface features (mountains, craters, bases...) stop
-* being computed/drawn at all - this is the real "distance at which
-* objects appear" knob, separate from the shape-detail LOD used once a
-* feature *is* being drawn (L725d4_SetDetailOpts/A6_optdetail*). The
-* stock $1000 was tuned to the ST's CPU budget; on GL there is no such
-* budget, so use a much smaller cutoff to let features start rendering
-* from far further away (see L41b2e_FlipScreen where this is selected).
+* Apparent planet size threshold (see 120(a3) in L3cd9c_ProjectPlanet):
+* individual surface features (mountains, craters, bases...) are skipped
+* entirely whenever 120(a3) is less than this value - this is the real
+* "distance at which objects appear" knob, separate from the shape-detail
+* LOD used once a feature *is* being drawn (L725d4_SetDetailOpts/
+* A6_optdetail*). The stock $1000 was tuned to the ST's CPU budget; on GL
+* there is no such budget, so use a much smaller threshold to let features
+* start rendering from far further away (see L41b2e_FlipScreen where this
+* is selected).
 planet_feature_lod_dist:	dc.w	$1000
 
 L41b2e_FlipScreen:
