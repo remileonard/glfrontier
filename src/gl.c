@@ -1609,7 +1609,18 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
  * entries always precede that planet's NU_PLANET entry. We therefore just
  * buffer the vertices as they are read back (Nu_DrawPlanetFeature*) and
  * flush/draw them from within Nu_DrawPlanet itself, once the planet's own
- * transform (position + rotation matrix) is known. */
+ * transform (position + rotation matrix) is known.
+ *
+ * Each contour is a *closed* loop, not an open polyline: once fe2.s hits
+ * the chain's terminating zero byte it calls L3dd6e, which reloads the
+ * chain's very first projected point (saved into 160(a3) by L3e036, the
+ * same routine our Nu_PutPlanetFeatureStart hcall is emitted from) and
+ * feeds it back into L3ddc4 to draw one last segment from the chain's
+ * last point back to its first - i.e. the 68k code itself closes the
+ * contour. draw_planet_features() below reproduces that exactly with one
+ * GL_LINE_LOOP per contour (which implicitly connects its last vertex
+ * back to its first), instead of independent GL_LINES segments that used
+ * to leave every contour open. */
 #define MAX_PLANET_FEATURE_VERTS	16384
 static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
 static unsigned char planet_feature_col[MAX_PLANET_FEATURE_VERTS][3];
@@ -1648,27 +1659,52 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, in
 	planet_feature_count++;
 }
 
-/* Draws the buffered coastline vertices as connected line segments and
+/* Draws the buffered coastline vertices as closed contour loops and
  * clears the buffer - call from inside the same glPushMatrix/glTranslatef/
- * glRotatef/glMultMatrixf block used for the planet's sphere, so the lines
- * are transformed exactly like draw_banded_sphere()'s mesh vertices. Each
- * segment is coloured with the colour the ST code itself set (d7) for
- * that vertex, captured by Nu_PutPlanetFeature - not a GL-side constant. */
+ * glRotatef/glMultMatrixf block used for the planet's sphere, so the loops
+ * are transformed exactly like draw_banded_sphere()'s mesh vertices.
+ *
+ * Each contour (a run of vertices between two newchain markers) is drawn
+ * as a single GL_LINE_LOOP, matching fe2.s's own L3dd6e closing behaviour
+ * (see the comment above): this both reproduces the real, closed contour
+ * geometry - rather than a set of disconnected open segments - and cuts
+ * the number of glBegin/glEnd batches down to one per contour instead of
+ * one pair of vertices at a time.
+ *
+ * The chain-start ("moveto") vertex has no real colour of its own (fe2.s
+ * hasn't set d7 yet at that point, see Nu_PutPlanetFeatureStart), so it
+ * borrows the very next vertex's captured colour - the real colour the
+ * 68k code used to draw the first edge of this same contour - rather
+ * than inventing one. */
 static void draw_planet_features (float size)
 {
-	int i;
+	int i, start;
 
-	if (planet_feature_count < 2) { planet_feature_count = 0; return; }
+	if (planet_feature_count < 1) { planet_feature_count = 0; return; }
 
 	glLineWidth (2.0f);
-	glBegin (GL_LINES);
-	for (i = 1; i < planet_feature_count; i++) {
-		if (planet_feature_newchain[i]) continue;
-		glColor3ubv (planet_feature_col[i]);
-		glVertex3f (planet_feature_dir[i-1][0]*size, planet_feature_dir[i-1][1]*size, planet_feature_dir[i-1][2]*size);
-		glVertex3f (planet_feature_dir[i][0]*size, planet_feature_dir[i][1]*size, planet_feature_dir[i][2]*size);
+
+	start = 0;
+	for (i = 1; i <= planet_feature_count; i++) {
+		if (i < planet_feature_count && !planet_feature_newchain[i]) continue;
+
+		if (i - start >= 2) {
+			int j;
+
+			planet_feature_col[start][0] = planet_feature_col[start+1][0];
+			planet_feature_col[start][1] = planet_feature_col[start+1][1];
+			planet_feature_col[start][2] = planet_feature_col[start+1][2];
+
+			glBegin (GL_LINE_LOOP);
+			for (j = start; j < i; j++) {
+				glColor3ubv (planet_feature_col[j]);
+				glVertex3f (planet_feature_dir[j][0]*size, planet_feature_dir[j][1]*size, planet_feature_dir[j][2]*size);
+			}
+			glEnd ();
+		}
+		start = i;
 	}
-	glEnd ();
+
 	glLineWidth (1.0f);
 
 	planet_feature_count = 0;
