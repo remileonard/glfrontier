@@ -1659,30 +1659,47 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, in
 	planet_feature_count++;
 }
 
-/* Draws the buffered coastline vertices as closed contour loops and
- * clears the buffer - call from inside the same glPushMatrix/glTranslatef/
- * glRotatef/glMultMatrixf block used for the planet's sphere, so the loops
- * are transformed exactly like draw_banded_sphere()'s mesh vertices.
+/* Draws the buffered coastline vertices as closed, filled contours (plus
+ * a crisp outline) and clears the buffer - call from inside the same
+ * glPushMatrix/glTranslatef/glRotatef/glMultMatrixf block used for the
+ * planet's sphere, so the contours are transformed exactly like
+ * draw_banded_sphere()'s mesh vertices.
  *
- * Each contour (a run of vertices between two newchain markers) is drawn
- * as a single GL_LINE_LOOP, matching fe2.s's own L3dd6e closing behaviour
- * (see the comment above): this both reproduces the real, closed contour
- * geometry - rather than a set of disconnected open segments - and cuts
- * the number of glBegin/glEnd batches down to one per contour instead of
- * one pair of vertices at a time.
+ * Each contour (a run of vertices between two newchain markers) is a
+ * real *closed* loop - see the block comment above - so, unlike an open
+ * polyline, it unambiguously encloses an area: the "continent" surface
+ * fe2.s's much higher line density made look filled on the ST's own
+ * screen. We now actually fill it, using the exact same technique this
+ * file already uses for other non-planar closed contours (ship/station
+ * "complex" shapes, see Nu_ComplexStart/flush_contour): project each
+ * contour vertex through the *current* modelview/projection (i.e. with
+ * the planet's own rotation/translation already applied) into screen
+ * space with gluProject, then hand the projected 2D points to the GLU
+ * tessellator (odd/even winding, same as the complex-shape path) to
+ * triangulate and fill. This adds no geometry beyond the real captured
+ * vertices themselves - the tessellator only ever synthesises new
+ * points where two of our own real edges cross (GLU_TESS_COMBINE),
+ * exactly as it does for every other tessellated shape in this file.
  *
  * The chain-start ("moveto") vertex has no real colour of its own (fe2.s
  * hasn't set d7 yet at that point, see Nu_PutPlanetFeatureStart), so it
  * borrows the very next vertex's captured colour - the real colour the
  * 68k code used to draw the first edge of this same contour - rather
- * than inventing one. */
+ * than inventing one; the whole contour is filled with that single real
+ * colour too, since fe2.s itself never varies d7 within one contour. */
+#define MAX_PLANET_FEATURE_TESS_VERTS	MAX_PLANET_FEATURE_VERTS
 static void draw_planet_features (float size)
 {
 	int i, start;
+	GLdouble mv[16], pr[16];
+	GLint vp[4];
+	static GLdouble tessv[MAX_PLANET_FEATURE_TESS_VERTS][3];
 
 	if (planet_feature_count < 1) { planet_feature_count = 0; return; }
 
-	glLineWidth (2.0f);
+	glGetDoublev (GL_MODELVIEW_MATRIX, mv);
+	glGetDoublev (GL_PROJECTION_MATRIX, pr);
+	glGetIntegerv (GL_VIEWPORT, vp);
 
 	start = 0;
 	for (i = 1; i <= planet_feature_count; i++) {
@@ -1695,17 +1712,56 @@ static void draw_planet_features (float size)
 			planet_feature_col[start][1] = planet_feature_col[start+1][1];
 			planet_feature_col[start][2] = planet_feature_col[start+1][2];
 
+			if (i - start >= 3) {
+				int k = 0;
+
+				complex_col[0] = planet_feature_col[start+1][0];
+				complex_col[1] = planet_feature_col[start+1][1];
+				complex_col[2] = planet_feature_col[start+1][2];
+
+				glMatrixMode (GL_PROJECTION);
+				glPushMatrix ();
+				glLoadIdentity ();
+				glOrtho (vp[0], vp[0]+vp[2], vp[1], vp[1]+vp[3], -1, 1);
+				glMatrixMode (GL_MODELVIEW);
+				glPushMatrix ();
+				glLoadIdentity ();
+
+				gluTessNormal (tobj, 0, 0, 1);
+				gluTessProperty (tobj, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_ODD);
+				gluTessBeginPolygon (tobj, NULL);
+				gluTessBeginContour (tobj);
+				for (j = start; j < i && k < MAX_PLANET_FEATURE_TESS_VERTS; j++) {
+					GLdouble *d = tessv[k];
+
+					if (!gluProject (planet_feature_dir[j][0]*size,
+							  planet_feature_dir[j][1]*size,
+							  planet_feature_dir[j][2]*size,
+							  mv, pr, vp, &d[0], &d[1], &d[2]))
+						continue;
+					k++;
+					gluTessVertex (tobj, d, d);
+				}
+				gluTessEndContour (tobj);
+				gluTessEndPolygon (tobj);
+
+				glMatrixMode (GL_PROJECTION);
+				glPopMatrix ();
+				glMatrixMode (GL_MODELVIEW);
+				glPopMatrix ();
+			}
+
+			glLineWidth (2.0f);
 			glBegin (GL_LINE_LOOP);
 			for (j = start; j < i; j++) {
 				glColor3ubv (planet_feature_col[j]);
 				glVertex3f (planet_feature_dir[j][0]*size, planet_feature_dir[j][1]*size, planet_feature_dir[j][2]*size);
 			}
 			glEnd ();
+			glLineWidth (1.0f);
 		}
 		start = i;
 	}
-
-	glLineWidth (1.0f);
 
 	planet_feature_count = 0;
 }
