@@ -1572,23 +1572,16 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
  *
  * Two dedicated hcalls, Nu_PutPlanetFeatureStart/Nu_PutPlanetFeature (see
  * below), now capture that per-planet feature vertex list before fe2.s
- * projects/clips it, so the real coastline geometry is drawn as actual
- * line segments from Nu_DrawPlanet (see draw_planet_features).
- *
- * The rest of the surface still doesn't have per-pixel land/sea shading
- * data available (Nu_PutPlanet only ever gives us a size, position,
- * rotation and two colours), so we still approximate the *look* of that
- * shading procedurally: a seamless 3D value-noise field evaluated directly
- * on the sphere's surface normal (no UV seams/pole pinching), thresholded
- * into continent-shaped patches, tinted with the same grey (0x777) the
- * original code uses for its feature points. The noise is seeded from the
- * planet's own colours+size, so a given planet's "continents" stay fixed
- * from frame to frame and rotate together with the planet itself (the
- * normal it is sampled at is already in the planet's own rotated space). */
+ * projects/clips it, so the real coastline geometry read from ST memory is
+ * drawn as actual line segments from Nu_DrawPlanet (see
+ * draw_planet_features), tinted with the same grey (0x777) the original
+ * code uses for those points. There is no invented/procedural geometry or
+ * per-planet random seed here any more: what gets drawn is exactly the
+ * feature list the 68k code itself walked for that planet, nothing more,
+ * nothing less - so R_GL and R_OLD show the same continents. */
 #define PLANET_LAND_TINT_R	112
 #define PLANET_LAND_TINT_G	112
 #define PLANET_LAND_TINT_B	112
-#define PLANET_LAND_MIX		0.45f
 
 /*
  * Real continent/coastline geometry.
@@ -1669,76 +1662,12 @@ static void draw_planet_features (float size)
 	planet_feature_count = 0;
 }
 
-static unsigned int planet_hash_u (int x, int y, int z, unsigned int seed)
-{
-	unsigned int h = seed;
-	h ^= (unsigned int) x * 374761393u;
-	h ^= (unsigned int) y * 668265263u;
-	h ^= (unsigned int) z * 2147483647u;
-	h = (h ^ (h >> 13)) * 1274126177u;
-	h ^= (h >> 16);
-	return h;
-}
-
-static float planet_hash_f (int x, int y, int z, unsigned int seed)
-{
-	return (float) (planet_hash_u (x, y, z, seed) & 0xffffff) / (float) 0xffffff;
-}
-
-/* Trilinearly interpolated value noise, sampled at an arbitrary 3D point
- * (not a 2D UV): evaluating it directly on points of the unit sphere gives
- * a pattern with no seam and no pole pinching. */
-static float planet_noise3 (float x, float y, float z, unsigned int seed)
-{
-	int x0 = (int) floorf (x), y0 = (int) floorf (y), z0 = (int) floorf (z);
-	float fx = x - x0, fy = y - y0, fz = z - z0;
-	float sx = fx*fx*(3.0f - 2.0f*fx);
-	float sy = fy*fy*(3.0f - 2.0f*fy);
-	float sz = fz*fz*(3.0f - 2.0f*fz);
-	float c000, c100, c010, c110, c001, c101, c011, c111;
-	float c00, c10, c01, c11, c0, c1;
-
-	c000 = planet_hash_f (x0,   y0,   z0,   seed);
-	c100 = planet_hash_f (x0+1, y0,   z0,   seed);
-	c010 = planet_hash_f (x0,   y0+1, z0,   seed);
-	c110 = planet_hash_f (x0+1, y0+1, z0,   seed);
-	c001 = planet_hash_f (x0,   y0,   z0+1, seed);
-	c101 = planet_hash_f (x0+1, y0,   z0+1, seed);
-	c011 = planet_hash_f (x0,   y0+1, z0+1, seed);
-	c111 = planet_hash_f (x0+1, y0+1, z0+1, seed);
-
-	c00 = c000 + sx*(c100-c000);
-	c10 = c010 + sx*(c110-c010);
-	c01 = c001 + sx*(c101-c001);
-	c11 = c011 + sx*(c111-c011);
-	c0 = c00 + sy*(c10-c00);
-	c1 = c01 + sy*(c11-c01);
-	return c0 + sz*(c1-c0);
-}
-
-/* Two extra octaves on top of the base frequency give the continent
- * outlines some coastline-like irregularity instead of perfectly smooth
- * blobs, without hiding the underlying banded shading. */
-static float planet_land_factor (const float n[3], unsigned int seed)
-{
-	float x = n[0]*3.0f, y = n[1]*3.0f, z = n[2]*3.0f;
-	float v = planet_noise3 (x, y, z, seed) * 0.6f
-		+ planet_noise3 (x*2.3f, y*2.3f, z*2.3f, seed + 1) * 0.3f
-		+ planet_noise3 (x*4.7f, y*4.7f, z*4.7f, seed + 2) * 0.1f;
-	/* soft threshold around the noise's mean so land covers roughly a
-	 * third of the surface instead of a hard 50/50 cut */
-	float land = (v - 0.55f) * 4.0f;
-	if (land < 0.0f) land = 0.0f;
-	if (land > 1.0f) land = 1.0f;
-	return land;
-}
-
 static void planet_banded_color (const float n_world[3], const float light_dir[3],
-				  const int dark[3], const int lit[3], unsigned int seed)
+				  const int dark[3], const int lit[3])
 {
 	float ndotl = n_world[0]*light_dir[0] + n_world[1]*light_dir[1] + n_world[2]*light_dir[2];
 	int step;
-	float t, land;
+	float t;
 	float r, g, b;
 
 	if (ndotl < 0.0f) ndotl = 0.0f;
@@ -1753,11 +1682,6 @@ static void planet_banded_color (const float n_world[3], const float light_dir[3
 	r = dark[0] + t*(lit[0]-dark[0]);
 	g = dark[1] + t*(lit[1]-dark[1]);
 	b = dark[2] + t*(lit[2]-dark[2]);
-
-	land = planet_land_factor (n_world, seed) * PLANET_LAND_MIX;
-	r += land * (PLANET_LAND_TINT_R - r);
-	g += land * (PLANET_LAND_TINT_G - g);
-	b += land * (PLANET_LAND_TINT_B - b);
 
 	/* dark[]/lit[] ultimately come from split_rgb444b() so they are
 	 * always within [0,255], but clamp anyway: floating point rounding
@@ -1776,7 +1700,7 @@ static void planet_banded_color (const float n_world[3], const float light_dir[3
  * gives clearly visible shading steps like the ST software renderer,
  * instead of a smooth GL-lit sphere. */
 static void draw_banded_sphere (float size, const GLfloat rot_matrix[16], const float light_dir[3],
-				 const int dark[3], const int lit[3], unsigned int seed)
+				 const int dark[3], const int lit[3])
 {
 	int i, j;
 
@@ -1797,11 +1721,11 @@ static void draw_banded_sphere (float size, const GLfloat rot_matrix[16], const 
 			float world0[3], world1[3];
 
 			planet_transform_normal (rot_matrix, n0, world0);
-			planet_banded_color (world0, light_dir, dark, lit, seed);
+			planet_banded_color (world0, light_dir, dark, lit);
 			glVertex3f (n0[0]*size, n0[1]*size, n0[2]*size);
 
 			planet_transform_normal (rot_matrix, n1, world1);
-			planet_banded_color (world1, light_dir, dark, lit, seed);
+			planet_banded_color (world1, light_dir, dark, lit);
 			glVertex3f (n1[0]*size, n1[1]*size, n1[2]*size);
 		}
 		glEnd ();
@@ -1868,8 +1792,7 @@ static void draw_banded_sphere (float size, const GLfloat rot_matrix[16], const 
 static int planet_ground_seen;
 
 static void draw_horizon_cap (const double centre[3], double R, double d,
-			      const float light_dir[3], const int dark[3], const int lit[3],
-			      unsigned int seed)
+			      const float light_dir[3], const int dark[3], const int lit[3])
 {
 	double up[3], e1[3], e2[3];
 	double theta_max, dot, len;
@@ -1963,7 +1886,7 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 			nf[0] = (float) n0[0];
 			nf[1] = (float) n0[1];
 			nf[2] = (float) n0[2];
-			planet_banded_color (nf, light_dir, dark, lit, seed);
+			planet_banded_color (nf, light_dir, dark, lit);
 			glVertex3f ((float) (GROUND_DOME_RADIUS*v0[0]),
 				    (float) (GROUND_DOME_RADIUS*v0[1]),
 				    (float) (GROUND_DOME_RADIUS*v0[2]));
@@ -1971,7 +1894,7 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 			nf[0] = (float) n1[0];
 			nf[1] = (float) n1[1];
 			nf[2] = (float) n1[2];
-			planet_banded_color (nf, light_dir, dark, lit, seed);
+			planet_banded_color (nf, light_dir, dark, lit);
 			glVertex3f ((float) (GROUND_DOME_RADIUS*v1[0]),
 				    (float) (GROUND_DOME_RADIUS*v1[1]),
 				    (float) (GROUND_DOME_RADIUS*v1[2]));
@@ -2060,20 +1983,10 @@ void Nu_DrawPlanet (void **data)
 	int dark[3], lit[3];
 	float light_vec[4], light_dir[3], len;
 	GLfloat rot_matrix[16];
-	unsigned int seed;
 
 	obj_col_raw = znode_rdlong (data);
 	light_col_raw = znode_rdlong (data);
 	size = znode_rdlong (data);
-
-	/* Stable per-planet identity for the procedural continent pattern
-	 * (see planet_land_factor): derived only from quantities that do not
-	 * change frame to frame for a given planet (its colours and radius),
-	 * never from position, which would make the "continents" slide
-	 * around as the camera/planet move. */
-	seed = ((unsigned int) obj_col_raw * 2654435761u)
-		^ ((unsigned int) light_col_raw * 40503u)
-		^ (unsigned int) size;
 
 	znode_rdvertexf (data, light_vec);
 	light_vec[3] = 0.0f;
@@ -2146,7 +2059,7 @@ void Nu_DrawPlanet (void **data)
 			 * sky backdrop too, so derive it from here rather than
 			 * from a game flag. Picked up by the next frame. */
 			planet_ground_seen = 1;
-			draw_horizon_cap (centre, R, d, light_dir, dark, lit, seed);
+			draw_horizon_cap (centre, R, d, light_dir, dark, lit);
 			/* Not drawn from this close-up "standing on the ground"
 			 * view (the coastline silhouette only makes sense seen
 			 * from afar); discard so it doesn't leak into the next
@@ -2163,7 +2076,7 @@ void Nu_DrawPlanet (void **data)
 	glMultMatrixf (rot_matrix);
 	glCullFace (GL_BACK);
 	glEnable (GL_CULL_FACE);
-	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit, seed);
+	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit);
 	glDisable (GL_CULL_FACE);
 	/* Real coastline geometry, captured via Nu_PutPlanetFeatureStart/
 	 * Nu_PutPlanetFeature. Drawn very slightly above the sphere's own
