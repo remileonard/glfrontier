@@ -17058,8 +17058,11 @@ L3d452_PlanetFeatureLoop:
 		
 		addq.l	#1,a5
 		move.b	(a5)+,d3
-		cmpi.w	#$1000,120(a3)
-		blt.s	L3d452_PlanetFeatureLoop
+		* was: cmpi.w #$1000,120(a3) / blt.s ... - see
+		* planet_feature_lod_dist for why this is now a variable.
+		move.w	planet_feature_lod_dist,d6
+		cmp.w	120(a3),d6
+		bgt.s	L3d452_PlanetFeatureLoop
 		asl.w	#8,d3
 		muls	130(a3),d3
 		add.l	d3,d3
@@ -17799,8 +17802,9 @@ L3dc5e:
 		cmp.w	d4,d3
 		bgt.s	L3dcbc
 		moveq	#0,d7
-		cmpi.w	#$1000,120(a3)
-		blt.s	l3dcd8
+		move.w	planet_feature_lod_dist,d6
+		cmp.w	120(a3),d6
+		bgt.s	l3dcd8
 		movem.w	d0-2,-(a7)
 		neg.w	d4
 		muls	d4,d0
@@ -22857,6 +22861,17 @@ stat_fps:	ds.w	1
 show_stats:	dc.w	0
 gl_renderer_on:	dc.w	1
 
+* Apparent planet size threshold (see 120(a3) in L3cd9c_ProjectPlanet):
+* individual surface features (mountains, craters, bases...) are skipped
+* entirely whenever 120(a3) is less than this value - this is the real
+* "distance at which objects appear" knob, separate from the shape-detail
+* LOD used once a feature *is* being drawn (L725d4_SetDetailOpts/
+* A6_optdetail*). The stock $1000 was tuned to the ST's CPU budget; on GL
+* there is no such budget, so use a much smaller threshold to let features
+* start rendering from far further away (see L41b2e_FlipScreen where this
+* is selected).
+planet_feature_lod_dist:	dc.w	$1000
+
 L41b2e_FlipScreen:
 		* Print fps
 		tst.w	show_stats
@@ -22888,6 +22903,15 @@ L41b2e_FlipScreen:
 
 		hcall	#Nu_IsGLRenderer
 		move.w	d0,gl_renderer_on
+		tst.w	d0
+		beq.s	l_pf_lod_stock
+		* GL: let planet surface features start rendering from far
+		* further away than the ST's CPU budget ever allowed.
+		move.w	#$100,planet_feature_lod_dist
+		bra.s	l_pf_lod_done
+	l_pf_lod_stock:
+		move.w	#$1000,planet_feature_lod_dist
+	l_pf_lod_done:
 		addq.w	#1,count_fps
 
 N_HostFlip:
@@ -48258,6 +48282,23 @@ L725ba:
 		rts
 
 L725d4_SetDetailOpts:
+		* GL rendering has none of the CPU/rasterizer limits the stock
+		* "shape detail" option was tuned around on the Atari ST, so
+		* always use the best (very high) preset while it is active,
+		* rather than whatever level of detail the player has picked
+		* (or the game's own low-detail default - see
+		* L7228e_opts_defaults). This is the only thing that gated how
+		* much planet surface detail/decor was generated at a distance;
+		* the values below are exactly the existing "very high" preset,
+		* so nothing new or unproven is exercised.
+		tst.w	gl_renderer_on
+		beq.s	l725e2_stock_detail
+		move.l	A6_opt_shape_detail(a6),d0
+		moveq	#-2,d1
+		moveq	#-4,d2
+		move.w	#$4200,d3
+		bra.w	l72608
+	l725e2_stock_detail:
 		move.l	A6_opt_shape_detail(a6),d0
 		moveq	#-2,d1
 		moveq	#-4,d2
