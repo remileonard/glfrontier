@@ -1564,24 +1564,24 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
 
 /* fe2.s carries a per-planet surface/continent pattern - see
  * L3cd9c_ProjectPlanet's L3d452_PlanetFeatureLoop, which walks a per-planet
- * list of feature points and plots them as small line segments in a
- * "continent" grey (L3ddc0/L3dec8, "move.l #$777,d7" and friends). That
- * path used to bypass every Nu_Put* hostcall we could hook into: it
- * projects points and clips lines by hand straight onto the ST's own 2D
- * screen buffer (L3ddc4's Cohen-Sutherland-style clip against L3de18).
+ * list of feature points and plots them as small line segments in the
+ * colour the 68k code itself puts in d7 (L3ddc0/L3dec8, "move.l #$777,d7"
+ * and friends - always the same terrain colour in the retail game, but we
+ * never hardcode that: see below). That path used to bypass every
+ * Nu_Put* hostcall we could hook into: it projects points and clips lines
+ * by hand straight onto the ST's own 2D screen buffer (L3ddc4's
+ * Cohen-Sutherland-style clip against L3de18).
  *
  * Two dedicated hcalls, Nu_PutPlanetFeatureStart/Nu_PutPlanetFeature (see
- * below), now capture that per-planet feature vertex list before fe2.s
- * projects/clips it, so the real coastline geometry read from ST memory is
- * drawn as actual line segments from Nu_DrawPlanet (see
- * draw_planet_features), tinted with the same grey (0x777) the original
- * code uses for those points. There is no invented/procedural geometry or
- * per-planet random seed here any more: what gets drawn is exactly the
- * feature list the 68k code itself walked for that planet, nothing more,
- * nothing less - so R_GL and R_OLD show the same continents. */
-#define PLANET_LAND_TINT_R	112
-#define PLANET_LAND_TINT_G	112
-#define PLANET_LAND_TINT_B	112
+ * below), now capture that per-planet feature vertex list - and the exact
+ * colour register (d7) the 68k code sets right before drawing each
+ * segment - before fe2.s projects/clips it, so the real coastline
+ * geometry and colour read from ST memory are drawn as actual line
+ * segments from Nu_DrawPlanet (see draw_planet_features). There is no
+ * invented/procedural geometry, colour palette or per-planet random seed
+ * here: what gets drawn is exactly the feature list and colour the 68k
+ * code itself computed for that planet, nothing more, nothing less - so
+ * R_GL and R_OLD show the same continents. */
 
 /*
  * Real continent/coastline geometry.
@@ -1612,12 +1612,14 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
  * transform (position + rotation matrix) is known. */
 #define MAX_PLANET_FEATURE_VERTS	16384
 static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
+static unsigned char planet_feature_col[MAX_PLANET_FEATURE_VERTS][3];
 static char planet_feature_newchain[MAX_PLANET_FEATURE_VERTS];
 static int planet_feature_count;
 
-static void planet_feature_push (int rawx, int rawy, int rawz, int newchain)
+static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, int newchain)
 {
 	float x, y, z, len;
+	int r, g, b;
 
 	if (planet_feature_count >= MAX_PLANET_FEATURE_VERTS) return;
 
@@ -1631,9 +1633,17 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int newchain)
 		x = 0.0f; y = 0.0f; z = 1.0f;
 	}
 
+	/* Same RGB444 -> RGB888 expansion as split_rgb444b()/znode_wrcolor():
+	 * the colour comes straight from the ST's own d7 register, never
+	 * from a palette invented on the GL side. */
+	split_rgb444b (rgb444col, &r, &g, &b);
+
 	planet_feature_dir[planet_feature_count][0] = x;
 	planet_feature_dir[planet_feature_count][1] = y;
 	planet_feature_dir[planet_feature_count][2] = z;
+	planet_feature_col[planet_feature_count][0] = (unsigned char) r;
+	planet_feature_col[planet_feature_count][1] = (unsigned char) g;
+	planet_feature_col[planet_feature_count][2] = (unsigned char) b;
 	planet_feature_newchain[planet_feature_count] = newchain;
 	planet_feature_count++;
 }
@@ -1641,18 +1651,20 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int newchain)
 /* Draws the buffered coastline vertices as connected line segments and
  * clears the buffer - call from inside the same glPushMatrix/glTranslatef/
  * glRotatef/glMultMatrixf block used for the planet's sphere, so the lines
- * are transformed exactly like draw_banded_sphere()'s mesh vertices. */
+ * are transformed exactly like draw_banded_sphere()'s mesh vertices. Each
+ * segment is coloured with the colour the ST code itself set (d7) for
+ * that vertex, captured by Nu_PutPlanetFeature - not a GL-side constant. */
 static void draw_planet_features (float size)
 {
 	int i;
 
 	if (planet_feature_count < 2) { planet_feature_count = 0; return; }
 
-	glColor3ub (PLANET_LAND_TINT_R, PLANET_LAND_TINT_G, PLANET_LAND_TINT_B);
 	glLineWidth (2.0f);
 	glBegin (GL_LINES);
 	for (i = 1; i < planet_feature_count; i++) {
 		if (planet_feature_newchain[i]) continue;
+		glColor3ubv (planet_feature_col[i]);
 		glVertex3f (planet_feature_dir[i-1][0]*size, planet_feature_dir[i-1][1]*size, planet_feature_dir[i-1][2]*size);
 		glVertex3f (planet_feature_dir[i][0]*size, planet_feature_dir[i][1]*size, planet_feature_dir[i][2]*size);
 	}
@@ -1928,7 +1940,12 @@ void Nu_DrawPlanetFeatureStart (void **data)
 	x = znode_rdlong (data);
 	y = znode_rdlong (data);
 	z = znode_rdlong (data);
-	planet_feature_push (x, y, z, 1);
+	/* This is only ever a "moveto": fe2.s never draws a visible segment
+	 * for it (see draw_planet_features, which only colours the
+	 * *ending* vertex of a segment), so no real d7 colour has been set
+	 * by the 68k code yet at this point - the colour value stored here
+	 * is unused for rendering. */
+	planet_feature_push (x, y, z, 0, 1);
 }
 
 void Nu_PutPlanetFeature ()
@@ -1938,14 +1955,19 @@ void Nu_PutPlanetFeature ()
 	znode_wrlong (reg_word_s16 (REG_D3));
 	znode_wrlong (reg_word_s16 (REG_D4));
 	znode_wrlong (reg_word_s16 (REG_D5));
+	/* The real terrain/feature colour the 68k code is about to draw
+	 * this segment with (fe2.s sets d7 immediately before this hcall,
+	 * l3d50a) - captured as-is, never decided on the GL side. */
+	znode_wrlong (GetReg (REG_D7));
 }
 void Nu_DrawPlanetFeature (void **data)
 {
-	int x, y, z;
+	int x, y, z, col;
 	x = znode_rdlong (data);
 	y = znode_rdlong (data);
 	z = znode_rdlong (data);
-	planet_feature_push (x, y, z, 0);
+	col = znode_rdlong (data);
+	planet_feature_push (x, y, z, col, 0);
 }
 
 /* not finished by a long shot */

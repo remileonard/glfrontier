@@ -17093,9 +17093,12 @@ L3d452_PlanetFeatureLoop:
 		bra.s	l3d50e
 	l3d50a:
 		* d3/d4/d5 = raw (pre-rotation) local model-space vertex to
-		* connect to the previous contour point.
-		hcall	#Nu_PutPlanetFeature
+		* connect to the previous contour point; d7 = the real
+		* terrain/feature colour the 68k code is about to draw with
+		* (set just below). Read it after d7 is set so GL uses the
+		* exact same colour as the ST, never one of its own.
 		move.l	#$777,d7
+		hcall	#Nu_PutPlanetFeature
 		bsr.w	L3ddc0
 	l3d50e:	move.b	(a5)+,d3
 		bne.w	l3d454_again_again
