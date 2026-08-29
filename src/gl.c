@@ -2044,7 +2044,16 @@ static inline int reg_word_s16 (int reg)
 void Nu_PutPlanetFeatureStart ()
 {
 	if (use_renderer == R_OLD) return;
-	fprintf (stderr, "DEBUG Nu_PutPlanetFeatureStart frame=%d\n", debug_frame_counter);
+	/* D7 at this exact point still holds the per-chain-group "feature
+	 * type" byte fe2.s read from the model data at L3d3f0 (move.b
+	 * (a5)+,d7), sign-extended: it has NOT yet been overwritten with
+	 * the hardcoded $777 gray that L3d50a forces for every subsequent
+	 * point of the same chain. Logging it here (temporarily) to find
+	 * out, from real game data, which values actually occur - negative
+	 * values route to fe2.s's separate "circles on planet surface"
+	 * code (l3db7c) that draw_planet_features()/this hcall pair never
+	 * captures at all today. */
+	fprintf (stderr, "DEBUG Nu_PutPlanetFeatureStart frame=%d type_d7=%d\n", debug_frame_counter, reg_word_s16 (REG_D7));
 	znode_wrlong (NU_PLANETFEATURESTART);
 	znode_wrlong (reg_word_s16 (REG_D3));
 	znode_wrlong (reg_word_s16 (REG_D4));
