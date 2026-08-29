@@ -1693,9 +1693,24 @@ static void draw_planet_features (float size)
 	int i, start;
 	GLdouble mv[16], pr[16];
 	GLint vp[4];
+	GLboolean had_cull_face;
 	static GLdouble tessv[MAX_PLANET_FEATURE_TESS_VERTS][3];
 
 	if (planet_feature_count < 1) { planet_feature_count = 0; return; }
+
+	/* draw_banded_sphere() (far branch) enables GL_CULL_FACE for its own
+	 * mesh and disables it again before this is reached, but the near
+	 * (horizon-cap) branch never touches cull-face at all, so it relies
+	 * on whatever state happened to be left by something else drawn
+	 * earlier in the same frame. The tessellated fill below is a flat,
+	 * screen-space polygon whose winding depends on the on-screen order
+	 * of the real captured vertices, not on any consistent front/back
+	 * facing - so leave it off here rather than trusting the caller/
+	 * previous state, or a stray enabled cull-face could silently
+	 * discard the whole fill. Restore whatever state we found once done,
+	 * so we don't affect anything drawn afterwards in the same frame. */
+	had_cull_face = glIsEnabled (GL_CULL_FACE);
+	glDisable (GL_CULL_FACE);
 
 	glGetDoublev (GL_MODELVIEW_MATRIX, mv);
 	glGetDoublev (GL_PROJECTION_MATRIX, pr);
@@ -1764,6 +1779,8 @@ static void draw_planet_features (float size)
 	}
 
 	planet_feature_count = 0;
+
+	if (had_cull_face) glEnable (GL_CULL_FACE);
 }
 
 static void planet_banded_color (const float n_world[3], const float light_dir[3],
