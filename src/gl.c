@@ -1626,6 +1626,7 @@ static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
 static unsigned char planet_feature_col[MAX_PLANET_FEATURE_VERTS][3];
 static char planet_feature_newchain[MAX_PLANET_FEATURE_VERTS];
 static int planet_feature_count;
+int debug_frame_counter;
 
 static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, int newchain)
 {
@@ -1696,7 +1697,12 @@ static void draw_planet_features (float size)
 	GLboolean had_cull_face;
 	static GLdouble tessv[MAX_PLANET_FEATURE_TESS_VERTS][3];
 
-	if (planet_feature_count < 1) { planet_feature_count = 0; return; }
+	if (planet_feature_count < 1) {
+		fprintf (stderr, "DEBUG draw_planet_features: EMPTY (count=%d) frame=%d\n", planet_feature_count, debug_frame_counter);
+		planet_feature_count = 0;
+		return;
+	}
+	fprintf (stderr, "DEBUG draw_planet_features: count=%d frame=%d\n", planet_feature_count, debug_frame_counter);
 
 	/* draw_banded_sphere() (far branch) enables GL_CULL_FACE for its own
 	 * mesh and disables it again before this is reached, but the near
@@ -2038,6 +2044,7 @@ static inline int reg_word_s16 (int reg)
 void Nu_PutPlanetFeatureStart ()
 {
 	if (use_renderer == R_OLD) return;
+	fprintf (stderr, "DEBUG Nu_PutPlanetFeatureStart frame=%d\n", debug_frame_counter);
 	znode_wrlong (NU_PLANETFEATURESTART);
 	znode_wrlong (reg_word_s16 (REG_D3));
 	znode_wrlong (reg_word_s16 (REG_D4));
@@ -2060,6 +2067,7 @@ void Nu_DrawPlanetFeatureStart (void **data)
 void Nu_PutPlanetFeature ()
 {
 	if (use_renderer == R_OLD) return;
+	fprintf (stderr, "DEBUG Nu_PutPlanetFeature frame=%d\n", debug_frame_counter);
 	znode_wrlong (NU_PLANETFEATURE);
 	znode_wrlong (reg_word_s16 (REG_D3));
 	znode_wrlong (reg_word_s16 (REG_D4));
@@ -2147,6 +2155,7 @@ void Nu_DrawPlanet (void **data)
 	znode_rdvertex (data, v1);
 	znode_rdmatrix (data, rot_matrix);
 
+	fprintf (stderr, "DEBUG Nu_DrawPlanet frame=%d size=%d pos=(%d,%d,%d) feature_count=%d\n", debug_frame_counter, size, v1[0], v1[1], v1[2], planet_feature_count);
 	//printf ("planet size %d, pos (%d,%d,%d)\n", size,v1[0],v1[1],v1[2]);
 
 	/* Close enough for the surface to be "the ground"? Then draw only the
@@ -2634,6 +2643,7 @@ static void set_gl_clear_col (int rgb)
 
 void Nu_DrawScreen ()
 {
+	fprintf (stderr, "DEBUG Nu_DrawScreen ENTER frame=%d use_renderer=%d\n", debug_frame_counter, use_renderer);
 	/* build RGB palettes */
 	_BuildRGBPalette (MainRGBPalette, MainPalette, len_main_palette);
 	_BuildRGBPalette (CtrlRGBPalette, CtrlPalette, 16);
@@ -2660,6 +2670,7 @@ void Nu_DrawScreen ()
 	glFlush ();
 	
 	SDL_GL_SwapBuffers ();
+	debug_frame_counter++;
 
 	/* frontier background color... */
 	if (use_renderer == R_GLWIRE) {
