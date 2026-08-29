@@ -2174,11 +2174,22 @@ void Nu_DrawPlanet (void **data)
 			 * from a game flag. Picked up by the next frame. */
 			planet_ground_seen = 1;
 			draw_horizon_cap (centre, R, d, light_dir, dark, lit);
-			/* Not drawn from this close-up "standing on the ground"
-			 * view (the coastline silhouette only makes sense seen
-			 * from afar); discard so it doesn't leak into the next
-			 * planet's feature list. */
-			planet_feature_count = 0;
+			/* The coastline contours are captured in the planet's own
+			 * local (pre-rotation) model space, exactly like the full
+			 * sphere's mesh vertices, so they need the very same
+			 * translate/rotate stack as the sphere path below to end
+			 * up in the right place on screen - draw_horizon_cap()
+			 * itself works directly in camera space and doesn't set
+			 * that up. Without this, close orbital/low-altitude views
+			 * (the ones filling most of the screen) silently dropped
+			 * every captured coastline instead of drawing it. */
+			glPushMatrix ();
+			glTranslatef (v1[0], v1[1], v1[2]);
+			glRotatef (180.0f, 1, 0, 0);
+			glRotatef (180.0f, 0, 1, 0);
+			glMultMatrixf (rot_matrix);
+			draw_planet_features ((float) size * 1.002f);
+			glPopMatrix ();
 			return;
 		}
 	}
