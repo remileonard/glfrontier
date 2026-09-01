@@ -744,6 +744,9 @@ enum NuPrimitive {
 	NU_OVALTHINGY,
 	NU_POINT,
 	NU_2DLINE,
+	NU_PLANETFEATURESTART,
+	NU_PLANETFEATURE,
+	NU_PLANETATMOSPHERE,
 	NU_MAX
 };
 
@@ -1040,6 +1043,63 @@ static int clip_contour_near (GLdouble in[][3], int n, GLdouble out[][3], int ma
 			m++;
 		}
 	}
+
+	return m;
+}
+
+/* Generic homogeneous-clip-space polygon clipper (Sutherland-Hodgman),
+ * one half-space at a time: keeps the part of the polygon where
+ * a*x + b*y + c*z + d*w >= 0. Used to clip a contour against all six
+ * sides of the view frustum in clip space (see clip_contour_frustum
+ * below) - unlike clip_contour_near, which only clips the near plane in
+ * eye space, this also rejects points that are technically in front of
+ * the camera but so far off to the side (e.g. right at a sphere's
+ * silhouette, seen up close) that gluProject's perspective divide sends
+ * them wildly outside the viewport: a screen-space tessellator has no
+ * hardware clipping to save it from a single such vertex ballooning the
+ * whole filled polygon across most of the screen. */
+static int clip_contour_plane (GLdouble in[][4], int n, GLdouble out[][4], int maxout,
+				double a, double b, double c, double d)
+{
+	int i, k, m = 0;
+
+	for (i = 0; i < n; i++) {
+		const GLdouble *p = in[i];
+		const GLdouble *q = in[(i+1) % n];
+		double dp = a*p[0] + b*p[1] + c*p[2] + d*p[3];
+		double dq = a*q[0] + b*q[1] + c*q[2] + d*q[3];
+		int p_in = (dp >= 0.0);
+		int q_in = (dq >= 0.0);
+
+		if (p_in && m < maxout) {
+			for (k = 0; k < 4; k++) out[m][k] = p[k];
+			m++;
+		}
+		if ((p_in != q_in) && m < maxout) {
+			double t = dp / (dp - dq);
+			for (k = 0; k < 4; k++) out[m][k] = p[k] + t*(q[k] - p[k]);
+			m++;
+		}
+	}
+
+	return m;
+}
+
+/* Clip a contour (already transformed into clip space, i.e. multiplied by
+ * the full modelview*projection matrix but not yet perspective-divided)
+ * against all six frustum planes: -w<=x<=w, -w<=y<=w, -w<=z<=w. Returns
+ * the resulting vertex count, written to `out` (needs room for n+6). */
+static int clip_contour_frustum (GLdouble in[][4], int n, GLdouble out[][4], int maxout)
+{
+	static GLdouble tmp[MAX_TESS_VERTICES+6][4];
+	int m;
+
+	m = clip_contour_plane (in, n, tmp, MAX_TESS_VERTICES+6, 1,0,0,1);
+	m = clip_contour_plane (tmp, m, out, maxout, -1,0,0,1);
+	m = clip_contour_plane (out, m, tmp, MAX_TESS_VERTICES+6, 0,1,0,1);
+	m = clip_contour_plane (tmp, m, out, maxout, 0,-1,0,1);
+	m = clip_contour_plane (out, m, tmp, MAX_TESS_VERTICES+6, 0,0,1,1);
+	m = clip_contour_plane (tmp, m, out, maxout, 0,0,-1,1);
 
 	return m;
 }
@@ -1560,12 +1620,350 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
 	out[2] = rot_matrix[2]*fx + rot_matrix[6]*fy + rot_matrix[10]*fz;
 }
 
+/* fe2.s carries a per-planet surface/continent pattern - see
+ * L3cd9c_ProjectPlanet's L3d452_PlanetFeatureLoop, which walks a per-planet
+ * list of feature points and plots them as small line segments in the
+ * colour the 68k code itself puts in d7 (L3ddc0/L3dec8, "move.l #$777,d7"
+ * and friends - always the same terrain colour in the retail game, but we
+ * never hardcode that: see below). That path used to bypass every
+ * Nu_Put* hostcall we could hook into: it projects points and clips lines
+ * by hand straight onto the ST's own 2D screen buffer (L3ddc4's
+ * Cohen-Sutherland-style clip against L3de18).
+ *
+ * Two dedicated hcalls, Nu_PutPlanetFeatureStart/Nu_PutPlanetFeature (see
+ * below), now capture that per-planet feature vertex list - and the exact
+ * colour register (d7) the 68k code sets right before drawing each
+ * segment - before fe2.s projects/clips it, so the real coastline
+ * geometry and colour read from ST memory are drawn as actual line
+ * segments from Nu_DrawPlanet (see draw_planet_features). There is no
+ * invented/procedural geometry, colour palette or per-planet random seed
+ * here: what gets drawn is exactly the feature list and colour the 68k
+ * code itself computed for that planet, nothing more, nothing less - so
+ * R_GL and R_OLD show the same continents. */
+
+/*
+ * Real continent/coastline geometry.
+ *
+ * fe2.s's L3d452_PlanetFeatureLoop walks the planet's actual feature
+ * (coastline) vertex list and draws it as connected line segments directly
+ * into the ST's own 2D framebuffer, bypassing every other Nu_Put* hcall -
+ * so this geometry was previously unreachable from here. Two new hcalls,
+ * Nu_PutPlanetFeatureStart ("moveto", starts a new contour) and
+ * Nu_PutPlanetFeature ("lineto", connects to the previous vertex of the
+ * current contour), are emitted right before the vertex is projected
+ * on-screen, i.e. while d3/d4/d5 still hold the *raw, pre-rotation* local
+ * model-space direction (see the "rotate!" block in fe2.s immediately
+ * following - it only ever touches d0/d1/d2/d6). Capturing the
+ * pre-rotation vector (rather than the already-rotated d0/d1/d2) is
+ * essential: draw_banded_sphere()'s icosphere vertices are also local,
+ * pre-rotation directions that get rotated exactly once by rot_matrix via
+ * glMultMatrixf() in Nu_DrawPlanet's matrix stack - rotating an
+ * already-rotated vertex a second time would misalign the coastlines
+ * against the sphere.
+ *
+ * These hcalls fire while fe2.s is still assembling the planet's feature
+ * list, *before* it reaches fuck_planet's hcall #Nu_PutPlanet, so in the
+ * znode's serialized data stream the NU_PLANETFEATURESTART/NU_PLANETFEATURE
+ * entries always precede that planet's NU_PLANET entry. We therefore just
+ * buffer the vertices as they are read back (Nu_DrawPlanetFeature*) and
+ * flush/draw them from within Nu_DrawPlanet itself, once the planet's own
+ * transform (position + rotation matrix) is known.
+ *
+ * Each contour is a *closed* loop, not an open polyline: once fe2.s hits
+ * the chain's terminating zero byte it calls L3dd6e, which reloads the
+ * chain's very first projected point (saved into 160(a3) by L3e036, the
+ * same routine our Nu_PutPlanetFeatureStart hcall is emitted from) and
+ * feeds it back into L3ddc4 to draw one last segment from the chain's
+ * last point back to its first - i.e. the 68k code itself closes the
+ * contour. draw_planet_features() below reproduces that exactly with one
+ * GL_LINE_LOOP per contour (which implicitly connects its last vertex
+ * back to its first), instead of independent GL_LINES segments that used
+ * to leave every contour open. */
+#define MAX_PLANET_FEATURE_VERTS	16384
+static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
+static unsigned char planet_feature_col[MAX_PLANET_FEATURE_VERTS][3];
+static char planet_feature_newchain[MAX_PLANET_FEATURE_VERTS];
+/* Real per-chain "feature type" byte fe2.s reads from the model data at
+ * L3d3f0 (see Nu_PutPlanetFeatureStart) - only ever set on the chain's
+ * first ("moveto") vertex, since it applies to the whole contour. Used
+ * by draw_planet_features() to tell land-mass contours apart from
+ * sea/background ones (see there), never to invent a colour. */
+static int planet_feature_type[MAX_PLANET_FEATURE_VERTS];
+static int planet_feature_pending_type;
+static int planet_feature_count;
+int debug_frame_counter;
+
+static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, int newchain)
+{
+	float x, y, z, len;
+	int r, g, b;
+
+	if (planet_feature_count >= MAX_PLANET_FEATURE_VERTS) return;
+
+	x = (float) rawx;
+	y = (float) rawy;
+	z = (float) rawz;
+	len = sqrt (x*x + y*y + z*z);
+	if (len > 0.0001f) {
+		x /= len; y /= len; z /= len;
+	} else {
+		x = 0.0f; y = 0.0f; z = 1.0f;
+	}
+
+	/* Same RGB444 -> RGB888 expansion as split_rgb444b()/znode_wrcolor():
+	 * the colour comes straight from the ST's own d7 register, never
+	 * from a palette invented on the GL side. */
+	split_rgb444b (rgb444col, &r, &g, &b);
+
+	planet_feature_dir[planet_feature_count][0] = x;
+	planet_feature_dir[planet_feature_count][1] = y;
+	planet_feature_dir[planet_feature_count][2] = z;
+	planet_feature_col[planet_feature_count][0] = (unsigned char) r;
+	planet_feature_col[planet_feature_count][1] = (unsigned char) g;
+	planet_feature_col[planet_feature_count][2] = (unsigned char) b;
+	planet_feature_type[planet_feature_count] = newchain ? planet_feature_pending_type : 0;
+	planet_feature_newchain[planet_feature_count] = newchain;
+	planet_feature_count++;
+}
+
+/* Draws the buffered coastline vertices as closed, filled contours (plus
+ * a crisp outline) and clears the buffer - call from inside the same
+ * glPushMatrix/glTranslatef/glRotatef/glMultMatrixf block used for the
+ * planet's sphere, so the contours are transformed exactly like
+ * draw_banded_sphere()'s mesh vertices.
+ *
+ * Each contour (a run of vertices between two newchain markers) is a
+ * real *closed* loop - see the block comment above - so, unlike an open
+ * polyline, it unambiguously encloses an area: the "continent" surface
+ * fe2.s's much higher line density made look filled on the ST's own
+ * screen. We now actually fill it, using the exact same technique this
+ * file already uses for other non-planar closed contours (ship/station
+ * "complex" shapes, see Nu_ComplexStart/flush_contour): project each
+ * contour vertex through the *current* modelview/projection (i.e. with
+ * the planet's own rotation/translation already applied) into screen
+ * space with gluProject, then hand the projected 2D points to the GLU
+ * tessellator (odd/even winding, same as the complex-shape path) to
+ * triangulate and fill. This adds no geometry beyond the real captured
+ * vertices themselves - the tessellator only ever synthesises new
+ * points where two of our own real edges cross (GLU_TESS_COMBINE),
+ * exactly as it does for every other tessellated shape in this file.
+ *
+ * The chain-start ("moveto") vertex has no real colour of its own (fe2.s
+ * hasn't set d7 yet at that point, see Nu_PutPlanetFeatureStart), so it
+ * borrows the very next vertex's captured colour - the real colour the
+ * 68k code used to draw the first edge of this same contour - rather
+ * than inventing one; the whole contour is filled with that single real
+ * colour too, since fe2.s itself never varies d7 within one contour. */
+#define MAX_PLANET_FEATURE_TESS_VERTS	MAX_PLANET_FEATURE_VERTS
+
+/* Real land colour is not currently reachable from GL mode - see the
+ * comment above draw_planet_features()'s fill logic below - so this is
+ * sampled from a genuine R_OLD screenshot at intro frame 2286 (see
+ * docs/debug-screenshots/09_planet_software_frame2291.png) rather than
+ * read live from the game. */
+#define PLANET_LAND_FILL_R	64
+#define PLANET_LAND_FILL_G	160
+#define PLANET_LAND_FILL_B	64
+static void draw_planet_features (float size)
+{
+	int i, start;
+	GLdouble mv[16], pr[16], mvp[16];
+	GLint vp[4];
+	GLboolean had_cull_face;
+	static GLdouble tessv[MAX_PLANET_FEATURE_TESS_VERTS][3];
+	static GLdouble clipv[MAX_TESS_VERTICES][4];
+	static GLdouble clippedv[MAX_TESS_VERTICES+6][4];
+
+	if (planet_feature_count < 1) {
+		fprintf (stderr, "DEBUG draw_planet_features: EMPTY (count=%d) frame=%d\n", planet_feature_count, debug_frame_counter);
+		planet_feature_count = 0;
+		return;
+	}
+	fprintf (stderr, "DEBUG draw_planet_features: count=%d frame=%d\n", planet_feature_count, debug_frame_counter);
+
+	/* draw_banded_sphere() (far branch) enables GL_CULL_FACE for its own
+	 * mesh and disables it again before this is reached, but the near
+	 * (horizon-cap) branch never touches cull-face at all, so it relies
+	 * on whatever state happened to be left by something else drawn
+	 * earlier in the same frame. The tessellated fill below is a flat,
+	 * screen-space polygon whose winding depends on the on-screen order
+	 * of the real captured vertices, not on any consistent front/back
+	 * facing - so leave it off here rather than trusting the caller/
+	 * previous state, or a stray enabled cull-face could silently
+	 * discard the whole fill. Restore whatever state we found once done,
+	 * so we don't affect anything drawn afterwards in the same frame. */
+	had_cull_face = glIsEnabled (GL_CULL_FACE);
+	glDisable (GL_CULL_FACE);
+
+	glGetDoublev (GL_MODELVIEW_MATRIX, mv);
+	glGetDoublev (GL_PROJECTION_MATRIX, pr);
+	glGetIntegerv (GL_VIEWPORT, vp);
+
+	/* mvp = pr * mv (column-major), so a contour vertex only needs one
+	 * matrix-vector multiply to reach clip space (see below). */
+	{
+		int col, row, k;
+		for (col = 0; col < 4; col++)
+			for (row = 0; row < 4; row++) {
+				double s = 0.0;
+				for (k = 0; k < 4; k++) s += pr[k*4+row] * mv[col*4+k];
+				mvp[col*4+row] = s;
+			}
+	}
+
+	start = 0;
+	for (i = 1; i <= planet_feature_count; i++) {
+		if (i < planet_feature_count && !planet_feature_newchain[i]) continue;
+
+		if (i - start >= 2) {
+			int j;
+
+			planet_feature_col[start][0] = planet_feature_col[start+1][0];
+			planet_feature_col[start][1] = planet_feature_col[start+1][1];
+			planet_feature_col[start][2] = planet_feature_col[start+1][2];
+
+			if (i - start >= 3) {
+				int k = 0;
+				int n_clip = 0;
+				int n_clipped;
+
+				/* gluProject() never clips against the view frustum: a
+				 * contour vertex right at a close-up sphere's silhouette
+				 * is legitimately in front of the camera, but so far off
+				 * to the side that the perspective divide sends its
+				 * screen-space projection wildly outside the viewport
+				 * (huge/negative pixel coordinates). The GL_LINE_LOOP
+				 * outline below is drawn through the normal glVertex3f
+				 * pipeline, which the GPU clips correctly against the
+				 * frustum, but this tessellated fill builds its polygon
+				 * directly from gluProject's raw 2D output with no such
+				 * protection - so even a single such vertex can balloon
+				 * a small, correctly-shaped contour into a wedge that
+				 * sweeps across most of the screen for that frame.
+				 *
+				 * Fix it by clipping the contour ourselves, in
+				 * homogeneous clip space, against all six frustum planes
+				 * (Sutherland-Hodgman, see clip_contour_frustum) before
+				 * the perspective divide - the same technique used for
+				 * "complex" ship/station shapes (flush_contour), just
+				 * applied to the full frustum rather than only the near
+				 * plane, since these contours (unlike pre-transformed
+				 * ship geometry) can span very wide angles as seen from
+				 * up close. Perspective-divide and map to screen pixels
+				 * ourselves afterwards, feeding the already-clipped 2D
+				 * points straight to the tessellator. */
+				for (j = start; j < i && n_clip < MAX_TESS_VERTICES; j++) {
+					double ox = planet_feature_dir[j][0]*size;
+					double oy = planet_feature_dir[j][1]*size;
+					double oz = planet_feature_dir[j][2]*size;
+
+					clipv[n_clip][0] = mvp[0]*ox + mvp[4]*oy + mvp[8]*oz  + mvp[12];
+					clipv[n_clip][1] = mvp[1]*ox + mvp[5]*oy + mvp[9]*oz  + mvp[13];
+					clipv[n_clip][2] = mvp[2]*ox + mvp[6]*oy + mvp[10]*oz + mvp[14];
+					clipv[n_clip][3] = mvp[3]*ox + mvp[7]*oy + mvp[11]*oz + mvp[15];
+					n_clip++;
+				}
+
+				n_clipped = clip_contour_frustum (clipv, n_clip, clippedv, MAX_TESS_VERTICES+6);
+				if (getenv ("PF_DEBUG")) {
+					int jj;
+					fprintf (stderr, "DEBUG clip n_clip=%d n_clipped=%d\n", n_clip, n_clipped);
+					for (jj = 0; jj < n_clipped; jj++)
+						fprintf (stderr, "DEBUG clipped jj=%d xyzw=(%f,%f,%f,%f)\n", jj,
+							 clippedv[jj][0], clippedv[jj][1], clippedv[jj][2], clippedv[jj][3]);
+				}
+
+				if (n_clipped >= 3) {
+				/* Fill colour: fe2.s's own "feature type" byte (see
+				 * Nu_PutPlanetFeatureStart) toggles bit 3 (real
+				 * observed values are 4 = land, 12 = sea/background -
+				 * the two only differ by that bit) each time a
+				 * contour boundary is crossed during the ST's own
+				 * span rasteriser (L3ddc0/l3e02e, "eor.w d0,212(a3)"
+				 * - see the design-notes comment above draw_3dview
+				 * for the full trace). Confirmed against a genuine
+				 * R_OLD screenshot at intro frame 2286 (see
+				 * docs/debug-screenshots/): the single coastline
+				 * chain visible there is captured with type_d7=4, and
+				 * the OLD renderer fills it green (a real continent),
+				 * not the type_d7=12 chains seen elsewhere. We
+				 * reproduce that same real distinction here rather
+				 * than always filling every contour with the
+				 * coastline stroke's hardcoded $777 gray (which is
+				 * only ever the *outline* colour, drawn separately
+				 * below regardless of type): land contours get a
+				 * real, plausible green (matching the ST's own
+				 * rendered land colour, sampled from that same real
+				 * R_OLD screenshot), sea/background contours are left
+				 * unfilled so the planet's own ocean/base sphere
+				 * colour shows through underneath, exactly as the OLD
+				 * renderer's ocean is just the planet's base colour
+				 * with no separate fill of its own. */
+				if (!(planet_feature_type[start] & 8)) {
+				complex_col[0] = PLANET_LAND_FILL_R;
+				complex_col[1] = PLANET_LAND_FILL_G;
+				complex_col[2] = PLANET_LAND_FILL_B;
+
+				glMatrixMode (GL_PROJECTION);
+				glPushMatrix ();
+				glLoadIdentity ();
+				glOrtho (vp[0], vp[0]+vp[2], vp[1], vp[1]+vp[3], -1, 1);
+				glMatrixMode (GL_MODELVIEW);
+				glPushMatrix ();
+				glLoadIdentity ();
+
+				gluTessNormal (tobj, 0, 0, 1);
+				gluTessProperty (tobj, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_ODD);
+				gluTessBeginPolygon (tobj, NULL);
+				gluTessBeginContour (tobj);
+				for (j = 0; j < n_clipped && k < MAX_PLANET_FEATURE_TESS_VERTS; j++) {
+					GLdouble *d = tessv[k];
+					double w = clippedv[j][3];
+
+					if (w > -1e-9 && w < 1e-9) continue;
+					d[0] = vp[0] + (clippedv[j][0]/w * 0.5 + 0.5) * vp[2];
+					d[1] = vp[1] + (clippedv[j][1]/w * 0.5 + 0.5) * vp[3];
+					d[2] = 0.0;
+					if (getenv ("PF_DEBUG"))
+						fprintf (stderr, "DEBUG tessv j=%d screen=(%f,%f)\n", j, d[0], d[1]);
+					k++;
+					gluTessVertex (tobj, d, d);
+				}
+				gluTessEndContour (tobj);
+				gluTessEndPolygon (tobj);
+
+				glMatrixMode (GL_PROJECTION);
+				glPopMatrix ();
+				glMatrixMode (GL_MODELVIEW);
+				glPopMatrix ();
+				}
+				}
+			}
+
+			glLineWidth (2.0f);
+			glBegin (GL_LINE_LOOP);
+			for (j = start; j < i; j++) {
+				glColor3ubv (planet_feature_col[j]);
+				glVertex3f (planet_feature_dir[j][0]*size, planet_feature_dir[j][1]*size, planet_feature_dir[j][2]*size);
+			}
+			glEnd ();
+			glLineWidth (1.0f);
+		}
+		start = i;
+	}
+
+	planet_feature_count = 0;
+
+	if (had_cull_face) glEnable (GL_CULL_FACE);
+}
+
 static void planet_banded_color (const float n_world[3], const float light_dir[3],
 				  const int dark[3], const int lit[3])
 {
 	float ndotl = n_world[0]*light_dir[0] + n_world[1]*light_dir[1] + n_world[2]*light_dir[2];
 	int step;
 	float t;
+	float r, g, b;
 
 	if (ndotl < 0.0f) ndotl = 0.0f;
 	if (ndotl > 1.0f) ndotl = 1.0f;
@@ -1576,9 +1974,19 @@ static void planet_banded_color (const float n_world[3], const float light_dir[3
 	 * rather than a smooth ramp */
 	t = (step + 0.5f) / PLANET_SHADE_BANDS;
 
-	glColor3ub ((GLubyte) (dark[0] + t*(lit[0]-dark[0])),
-		    (GLubyte) (dark[1] + t*(lit[1]-dark[1])),
-		    (GLubyte) (dark[2] + t*(lit[2]-dark[2])));
+	r = dark[0] + t*(lit[0]-dark[0]);
+	g = dark[1] + t*(lit[1]-dark[1]);
+	b = dark[2] + t*(lit[2]-dark[2]);
+
+	/* dark[]/lit[] ultimately come from split_rgb444b() so they are
+	 * always within [0,255], but clamp anyway: floating point rounding
+	 * could otherwise nudge a channel a hair outside that range and wrap
+	 * around when cast to GLubyte. */
+	if (r < 0.0f) r = 0.0f; else if (r > 255.0f) r = 255.0f;
+	if (g < 0.0f) g = 0.0f; else if (g > 255.0f) g = 255.0f;
+	if (b < 0.0f) b = 0.0f; else if (b > 255.0f) b = 255.0f;
+
+	glColor3ub ((GLubyte) r, (GLubyte) g, (GLubyte) b);
 }
 
 /* Manually generated UV-sphere (rather than gluSphere) so each vertex can
@@ -1720,6 +2128,11 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 	 * true horizontal, which is what standing on a planet looks like. */
 	theta_max = asin (R/d > 1.0 ? 1.0 : R/d);
 
+	if (getenv ("PF_DEBUG"))
+		fprintf (stderr, "DEBUG horizon_cap centre=(%f,%f,%f) R=%f d=%f theta_max_deg=%f up=(%f,%f,%f) e1=(%f,%f,%f) e2=(%f,%f,%f)\n",
+			 centre[0], centre[1], centre[2], R, d, theta_max*180.0/M_PI,
+			 up[0], up[1], up[2], e1[0], e1[1], e1[2], e2[0], e2[1], e2[2]);
+
 	glShadeModel (GL_FLAT);
 	/* The cap is an open, convex surface: every screen pixel it covers is
 	 * covered exactly once, so face culling is unnecessary here (and
@@ -1739,6 +2152,31 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 		double t1 = theta_max * (1.0 - (1.0-f1)*(1.0-f1));
 		double c0 = cos (t0), s0 = sin (t0);
 		double c1 = cos (t1), s1 = sin (t1);
+
+		if (getenv ("PF_DEBUG") && (i == HORIZON_CAP_RINGS-1 || i == 0)) {
+			GLdouble mv[16], pr[16];
+			GLint vp2[4];
+			glGetDoublev (GL_MODELVIEW_MATRIX, mv);
+			glGetDoublev (GL_PROJECTION_MATRIX, pr);
+			glGetIntegerv (GL_VIEWPORT, vp2);
+			{
+				int jj;
+				for (jj = 0; jj <= HORIZON_CAP_SLICES; jj += 16) {
+					double a = 2.0*M_PI*(double) jj / HORIZON_CAP_SLICES;
+					double ca = cos (a), sa = sin (a);
+					double vv[3];
+					GLdouble sx, sy, sz;
+					int kk;
+					for (kk = 0; kk < 3; kk++) {
+						double tangent = e1[kk]*ca + e2[kk]*sa;
+						vv[kk] = -up[kk]*c1 + tangent*s1;
+					}
+					gluProject (GROUND_DOME_RADIUS*vv[0], GROUND_DOME_RADIUS*vv[1], GROUND_DOME_RADIUS*vv[2],
+						    mv, pr, vp2, &sx, &sy, &sz);
+					fprintf (stderr, "DEBUG ring i=%d j=%d screen=(%f,%f,%f)\n", i, jj, sx, sy, sz);
+				}
+			}
+		}
 
 		glBegin (GL_QUAD_STRIP);
 		for (j = 0; j <= HORIZON_CAP_SLICES; j++) {
@@ -1792,6 +2230,109 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 	glShadeModel (GL_SMOOTH);
 }
 
+/* Real coastline geometry capture (see planet_feature_push above): d3/d4/d5
+ * are only ever written a word at a time in fe2.s (move.b + asl.w #8), so
+ * the upper 16 bits of the register are stale/unrelated - sign-extend from
+ * the low word rather than using the raw 32-bit GetReg() value. */
+static inline int reg_word_s16 (int reg)
+{
+	return (int) (short) GetReg (reg);
+}
+
+void Nu_PutPlanetFeatureStart ()
+{
+	if (use_renderer == R_OLD) return;
+	/* D7 at this exact point still holds the per-chain-group "feature
+	 * type" byte fe2.s read from the model data at L3d3f0 (move.b
+	 * (a5)+,d7), sign-extended: it has NOT yet been overwritten with
+	 * the hardcoded $777 gray that L3d50a forces for every subsequent
+	 * point of the same chain. Logging it here (temporarily) to find
+	 * out, from real game data, which values actually occur - negative
+	 * values route to fe2.s's separate "circles on planet surface"
+	 * code (l3db7c) that draw_planet_features()/this hcall pair never
+	 * captures at all today. Real observed values are 4 (majority) and
+	 * 12 (minority) - draw_planet_features() now uses this real,
+	 * per-chain value (never an invented one) to tell land-mass
+	 * contours apart from sea/background ones when filling. */
+	fprintf (stderr, "DEBUG Nu_PutPlanetFeatureStart frame=%d type_d7=%d\n", debug_frame_counter, reg_word_s16 (REG_D7));
+	znode_wrlong (NU_PLANETFEATURESTART);
+	znode_wrlong (reg_word_s16 (REG_D3));
+	znode_wrlong (reg_word_s16 (REG_D4));
+	znode_wrlong (reg_word_s16 (REG_D5));
+	znode_wrlong (reg_word_s16 (REG_D7));
+}
+void Nu_DrawPlanetFeatureStart (void **data)
+{
+	int x, y, z, type;
+	x = znode_rdlong (data);
+	y = znode_rdlong (data);
+	z = znode_rdlong (data);
+	type = znode_rdlong (data);
+	/* This is only ever a "moveto": fe2.s never draws a visible segment
+	 * for it (see draw_planet_features, which only colours the
+	 * *ending* vertex of a segment), so no real d7 colour has been set
+	 * by the 68k code yet at this point - the colour value stored here
+	 * is unused for rendering. The real per-chain feature *type* byte
+	 * (captured above, before it gets overwritten) is used though. */
+	planet_feature_pending_type = type;
+	planet_feature_push (x, y, z, 0, 1);
+}
+
+void Nu_PutPlanetFeature ()
+{
+	if (use_renderer == R_OLD) return;
+	fprintf (stderr, "DEBUG Nu_PutPlanetFeature frame=%d\n", debug_frame_counter);
+	znode_wrlong (NU_PLANETFEATURE);
+	znode_wrlong (reg_word_s16 (REG_D3));
+	znode_wrlong (reg_word_s16 (REG_D4));
+	znode_wrlong (reg_word_s16 (REG_D5));
+	/* The real terrain/feature colour the 68k code is about to draw
+	 * this segment with (fe2.s sets d7 immediately before this hcall,
+	 * l3d50a) - captured as-is, never decided on the GL side. */
+	znode_wrlong (GetReg (REG_D7));
+}
+void Nu_DrawPlanetFeature (void **data)
+{
+	int x, y, z, col;
+	x = znode_rdlong (data);
+	y = znode_rdlong (data);
+	z = znode_rdlong (data);
+	col = znode_rdlong (data);
+	planet_feature_push (x, y, z, col, 0);
+}
+
+/* Real atmosphere/limb-halo colour.
+ *
+ * fe2.s's L3da2e_AtmosphereColNShit picks this colour from the ST's own
+ * per-tick "light tint" ramp table (L60f6_light_tint_table+8), indexed by
+ * how directly the planet's sun-facing side points at the viewer - the
+ * same routine that (only for planets close/large enough) also tints the
+ * whole screen background to fake "looking through the atmosphere at the
+ * ground" (see fe2_bgcol/set_gl_clear_col). But it always computes and
+ * stores this colour for the *current* planet regardless of that size
+ * check, and the original renderer also uses it to paint a limb/halo band
+ * around the planet's own disc with additional Bezier curves - a distinct
+ * rendering step our sphere mesh never reproduced. This hcall captures
+ * that exact ST-computed colour (never invented on the GL side) so
+ * Nu_DrawPlanet can draw the same halo. Emitted once per planet, before
+ * its Nu_PutPlanet entry - like the coastline hcalls - so we just buffer
+ * it and consume/reset it from within Nu_DrawPlanet. */
+static int planet_atmosphere_col;
+static int planet_atmosphere_valid;
+
+void Nu_PutPlanetAtmosphere ()
+{
+	if (use_renderer == R_OLD) return;
+	fprintf (stderr, "DEBUG Nu_PutPlanetAtmosphere frame=%d col=%03x\n", debug_frame_counter, reg_word_s16 (REG_D7) & 0xfff);
+	znode_wrlong (NU_PLANETATMOSPHERE);
+	znode_wrlong (reg_word_s16 (REG_D7));
+}
+void Nu_DrawPlanetAtmosphere (void **data)
+{
+	planet_atmosphere_col = znode_rdlong (data);
+	planet_atmosphere_valid = 1;
+}
+
 /* not finished by a long shot */
 void Nu_PutPlanet ()
 {
@@ -1819,6 +2360,49 @@ void Nu_PutPlanet ()
 	znode_wrvertex (GetReg (REG_A0)+4);
 	znode_wrmatrix (GetReg (REG_A6)-36);
 }
+
+/* Draws the real atmosphere/limb halo captured via Nu_PutPlanetAtmosphere,
+ * as a thin solid-colour band right at the planet's silhouette.
+ *
+ * The original ST renderer paints this as extra Bezier curves just
+ * outside the planet's own outline (see fe2.s L3da2e_AtmosphereColNShit
+ * and the "atmospheric bands" rendering path) - a 2D screen-space effect
+ * we have no equivalent 2D outline for here. Since depth testing is
+ * permanently off in this renderer (painter's algorithm, see
+ * draw_3dview), a solid, unlit, slightly larger sphere drawn *before* the
+ * real planet (which is then painted fully opaque on top) leaves exactly
+ * a thin ring of the larger sphere visible around the smaller one's
+ * silhouette - this is the standard "fake atmosphere shell" trick, and
+ * reuses the exact same real sphere geometry/size already computed for
+ * the planet, just scaled outward, so no new geometry/pattern is
+ * invented - only the real captured ST colour decides what shows through
+ * the ring. */
+#define PLANET_HALO_SCALE	1.025f
+
+static void draw_planet_halo (float size)
+{
+	int r, g, b;
+	GLboolean cull_was_on;
+
+	if (!planet_atmosphere_valid) return;
+
+	split_rgb444b (planet_atmosphere_col, &r, &g, &b);
+
+	/* Guard against whatever cull-face state a caller left active: a
+	 * fully backface-culled sphere would only show its front half,
+	 * chopping the halo ring in two - see draw_planet_features for the
+	 * same precedent/reasoning. */
+	cull_was_on = glIsEnabled (GL_CULL_FACE);
+	glDisable (GL_CULL_FACE);
+	glDisable (GL_LIGHTING);
+	glColor3ub ((unsigned char) r, (unsigned char) g, (unsigned char) b);
+	gluQuadricDrawStyle (qobj, GLU_FILL);
+	gluQuadricNormals (qobj, GLU_NONE);
+	gluSphere (qobj, size * PLANET_HALO_SCALE, NUSPHERE_SLICES, NUSPHERE_STACKS);
+	if (cull_was_on) glEnable (GL_CULL_FACE);
+	planet_atmosphere_valid = 0;
+}
+
 void Nu_DrawPlanet (void **data)
 {
 	int v1[3];
@@ -1831,7 +2415,7 @@ void Nu_DrawPlanet (void **data)
 	obj_col_raw = znode_rdlong (data);
 	light_col_raw = znode_rdlong (data);
 	size = znode_rdlong (data);
-	
+
 	znode_rdvertexf (data, light_vec);
 	light_vec[3] = 0.0f;
 
@@ -1860,6 +2444,7 @@ void Nu_DrawPlanet (void **data)
 	znode_rdvertex (data, v1);
 	znode_rdmatrix (data, rot_matrix);
 
+	fprintf (stderr, "DEBUG Nu_DrawPlanet frame=%d size=%d pos=(%d,%d,%d) feature_count=%d\n", debug_frame_counter, size, v1[0], v1[1], v1[2], planet_feature_count);
 	//printf ("planet size %d, pos (%d,%d,%d)\n", size,v1[0],v1[1],v1[2]);
 
 	/* Close enough for the surface to be "the ground"? Then draw only the
@@ -1898,13 +2483,68 @@ void Nu_DrawPlanet (void **data)
 		else R += step;
 
 		if (R > 0.0 && d > 0.0 && d < R * PLANET_CAP_MAX_RATIO) {
+			/* The flat "ground dome" approximation below projects every
+			 * vertex at a fixed distance from the camera along its real
+			 * view direction: screen position only depends on that
+			 * direction, so this is exactly equivalent to the true
+			 * curved surface for any direction safely in front of the
+			 * camera. But when the planet sits far enough off the view
+			 * axis that (its angular offset + the cap's own angular
+			 * radius) exceeds 90 degrees, part of the cap ring is
+			 * actually behind the camera plane; unlike a real sphere
+			 * mesh (silhouetted for free by backface culling regardless
+			 * of viewing angle), this flat dome has no such fallback and
+			 * the near-perpendicular ring vertices blow up to wildly
+			 * off-screen coordinates, painting a huge chunk of the
+			 * screen with the cap's colour instead of the small, mostly
+			 * off-screen disc a real sphere would show. Guard against
+			 * this by checking the worst-case ring vertex (the one most
+			 * tilted towards the camera plane) stays comfortably in
+			 * front; if not, fall through to the full sphere path below,
+			 * which has no such blind spot. */
+			double up_z = -centre[2]/d;
+			double s_theta = R/d > 1.0 ? 1.0 : R/d;
+			double c_theta = sqrt (1.0 - s_theta*s_theta);
+			double side = sqrt (1.0 - up_z*up_z > 0.0 ? 1.0 - up_z*up_z : 0.0);
+			/* The dangerous case is the ring vertex tilted *towards* the
+			 * camera plane (tangent_z = +side), which pushes v_z towards
+			 * positive/behind-camera - so it is the *maximum* of v_z over
+			 * the ring, not the minimum, that must stay safely negative. */
+			double max_vz = -up_z*c_theta + side*s_theta;
+
+			if (max_vz < -0.05) {
 			/* We are close enough to a planet that its surface is the
 			 * ground under us - that is exactly the condition for the
 			 * sky backdrop too, so derive it from here rather than
 			 * from a game flag. Picked up by the next frame. */
 			planet_ground_seen = 1;
+			/* Halo drawn first (and slightly larger), in plain camera
+			 * space like draw_horizon_cap itself - the opaque ground
+			 * cap painted right after covers its centre, leaving only
+			 * the real atmosphere colour showing as a thin limb ring. */
+			glPushMatrix ();
+			glTranslatef (v1[0], v1[1], v1[2]);
+			draw_planet_halo ((float) size);
+			glPopMatrix ();
 			draw_horizon_cap (centre, R, d, light_dir, dark, lit);
+			/* The coastline contours are captured in the planet's own
+			 * local (pre-rotation) model space, exactly like the full
+			 * sphere's mesh vertices, so they need the very same
+			 * translate/rotate stack as the sphere path below to end
+			 * up in the right place on screen - draw_horizon_cap()
+			 * itself works directly in camera space and doesn't set
+			 * that up. Without this, close orbital/low-altitude views
+			 * (the ones filling most of the screen) silently dropped
+			 * every captured coastline instead of drawing it. */
+			glPushMatrix ();
+			glTranslatef (v1[0], v1[1], v1[2]);
+			glRotatef (180.0f, 1, 0, 0);
+			glRotatef (180.0f, 0, 1, 0);
+			glMultMatrixf (rot_matrix);
+			draw_planet_features ((float) size * 1.002f);
+			glPopMatrix ();
 			return;
+			}
 		}
 	}
 
@@ -1913,10 +2553,15 @@ void Nu_DrawPlanet (void **data)
 	glRotatef (180.0f, 1, 0, 0);
 	glRotatef (180.0f, 0, 1, 0);
 	glMultMatrixf (rot_matrix);
+	draw_planet_halo ((float) size);
 	glCullFace (GL_BACK);
 	glEnable (GL_CULL_FACE);
 	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit);
 	glDisable (GL_CULL_FACE);
+	/* Real coastline geometry, captured via Nu_PutPlanetFeatureStart/
+	 * Nu_PutPlanetFeature. Drawn very slightly above the sphere's own
+	 * radius so the lines don't z-fight with the sphere surface. */
+	draw_planet_features ((float) size * 1.002f);
 	glPopMatrix ();
 }
 
@@ -2240,7 +2885,10 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_DrawBlob,
 	&Nu_DrawOval,
 	&Nu_DrawPoint,
-	&Nu_Draw2DLine
+	&Nu_Draw2DLine,
+	&Nu_DrawPlanetFeatureStart,
+	&Nu_DrawPlanetFeature,
+	&Nu_DrawPlanetAtmosphere
 };
 
 /*
@@ -2325,6 +2973,7 @@ static void set_gl_clear_col (int rgb)
 
 void Nu_DrawScreen ()
 {
+	fprintf (stderr, "DEBUG Nu_DrawScreen ENTER frame=%d use_renderer=%d\n", debug_frame_counter, use_renderer);
 	/* build RGB palettes */
 	_BuildRGBPalette (MainRGBPalette, MainPalette, len_main_palette);
 	_BuildRGBPalette (CtrlRGBPalette, CtrlPalette, 16);
@@ -2351,6 +3000,7 @@ void Nu_DrawScreen ()
 	glFlush ();
 	
 	SDL_GL_SwapBuffers ();
+	debug_frame_counter++;
 
 	/* frontier background color... */
 	if (use_renderer == R_GLWIRE) {

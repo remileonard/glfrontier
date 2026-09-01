@@ -12,6 +12,7 @@
 
 extern unsigned long VideoBase;
 extern unsigned char *VideoRaster;
+extern int debug_frame_counter;
 
 extern int fe2_bgcol;
 /* Set by Call_MemsetBlue (atmosphere flight "clear to sky colour") /
@@ -80,6 +81,9 @@ extern void Nu_PutCylinder ();
 extern void Nu_PutBlob ();
 extern void Nu_PutPlanet ();
 extern void Nu_Put2DLine ();
+extern void Nu_PutPlanetFeatureStart ();
+extern void Nu_PutPlanetFeature ();
+extern void Nu_PutPlanetAtmosphere ();
 
 extern int screen_w;
 extern int screen_h;

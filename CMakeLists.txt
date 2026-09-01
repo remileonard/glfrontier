@@ -107,6 +107,7 @@ target_link_libraries(frontier PRIVATE
 	PkgConfig::VORBISFILE
 	PkgConfig::VORBIS
 	PkgConfig::OGG
+	m
 )
 
 if(WITH_OGG_MUSIC)

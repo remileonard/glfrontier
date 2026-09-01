@@ -61,6 +61,9 @@ Nu_PutCylinder		equ	$76
 Nu_PutBlob		equ	$77
 Nu_PutPlanet		equ	$78
 Nu_Draw2DLine		equ	$79
+Nu_PutPlanetFeatureStart	equ	$7a
+Nu_PutPlanetFeature	equ	$7b
+Nu_PutPlanetAtmosphere	equ	$7c
 
 * don't change. it won't work yet.
 SCR_W			equ	320
@@ -17081,10 +17084,22 @@ L3d452_PlanetFeatureLoop:
 		bhi.w	L3d452_PlanetFeatureLoop
 		move.w	#$ffff,188(a3)
 		bra.w	L3d452_PlanetFeatureLoop
-	l3d4fe:	bsr.w	L3e036
+	l3d4fe:
+		* d3/d4/d5 = raw (pre-rotation) local model-space vertex of
+		* the new contour/chain start point. hcall is read-only
+		* (never calls SetReg) so it is a no-op for R_OLD.
+		hcall	#Nu_PutPlanetFeatureStart
+		bsr.w	L3e036
 		move.w	#$ffff,34(a3)
 		bra.s	l3d50e
-	l3d50a:	move.l	#$777,d7
+	l3d50a:
+		* d3/d4/d5 = raw (pre-rotation) local model-space vertex to
+		* connect to the previous contour point; d7 = the real
+		* terrain/feature colour the 68k code is about to draw with
+		* (set just below). Read it after d7 is set so GL uses the
+		* exact same colour as the ST, never one of its own.
+		move.l	#$777,d7
+		hcall	#Nu_PutPlanetFeature
 		bsr.w	L3ddc0
 	l3d50e:	move.b	(a5)+,d3
 		bne.w	l3d454_again_again
@@ -17590,6 +17605,15 @@ L3da2e_AtmosphereColNShit:
 		moveq	#6,d0
 	l3da62:	lea	-104(a6),a0
 		move.w	8(a0,d0.w),204(a3)
+		* real atmosphere/halo colour just picked from the ST's own
+		* per-tick light tint ramp table (L60f6_light_tint_table+8,
+		* indexed by sun-facing angle) - hcall is read-only (never
+		* calls SetReg) so it is a no-op for R_OLD. d0-d6/a0 are all
+		* still needed below so save them around the call.
+		movem.l	d0-6/a0,-(a7)
+		move.w	204(a3),d7
+		hcall	#Nu_PutPlanetAtmosphere
+		movem.l	(a7)+,d0-6/a0
 		tst.w	d0
 		bpl.s	l3da96
 		cmpi.w	#$5,206(a3)
