@@ -24,3 +24,14 @@ Cette session a aussi révélé une deuxième valeur de type de feature dans les
 logs de debug (`type_d7=12`, en plus de `type_d7=4` déjà connu), observée sur
 2010 appels à `Nu_PutPlanetFeatureStart` contre 6638 pour le type 4 — piste à
 approfondir pour le décodage des features planétaires ("cercles" éventuels).
+
+## Scène d'intro, frame 2015 (planète visible en bas à droite)
+
+`08_planet_opengl_frame2015.png` (mode `R_GL`, après la correction du bug de
+"dôme sol" qui plantait un immense aplat gris/bleu sur l'écran à cette frame
+précise) et `09_planet_software_frame2015.png` (mode `R_OLD`, même scène,
+capturée sur un run séparé via Ctrl+E basculé avant frame 2015 - la scène
+reste statique sur plusieurs centaines de frames donc identique à l'oeil)
+montrent que le rendu OpenGL correspond maintenant au rendu logiciel original
+pour cette frame (petit croissant de planète en bas à droite, plus d'aplat
+parasite).
