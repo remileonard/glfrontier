@@ -1755,6 +1755,15 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, in
  * than inventing one; the whole contour is filled with that single real
  * colour too, since fe2.s itself never varies d7 within one contour. */
 #define MAX_PLANET_FEATURE_TESS_VERTS	MAX_PLANET_FEATURE_VERTS
+
+/* Real land colour is not currently reachable from GL mode - see the
+ * comment above draw_planet_features()'s fill logic below - so this is
+ * sampled from a genuine R_OLD screenshot at intro frame 2286 (see
+ * docs/debug-screenshots/09_planet_software_frame2291.png) rather than
+ * read live from the game. */
+#define PLANET_LAND_FILL_R	64
+#define PLANET_LAND_FILL_G	160
+#define PLANET_LAND_FILL_B	64
 static void draw_planet_features (float size)
 {
 	int i, start;
@@ -1891,9 +1900,9 @@ static void draw_planet_features (float size)
 				 * renderer's ocean is just the planet's base colour
 				 * with no separate fill of its own. */
 				if (!(planet_feature_type[start] & 8)) {
-				complex_col[0] = 64;
-				complex_col[1] = 160;
-				complex_col[2] = 64;
+				complex_col[0] = PLANET_LAND_FILL_R;
+				complex_col[1] = PLANET_LAND_FILL_G;
+				complex_col[2] = PLANET_LAND_FILL_B;
 
 				glMatrixMode (GL_PROJECTION);
 				glPushMatrix ();
