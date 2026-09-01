@@ -25,13 +25,16 @@ logs de debug (`type_d7=12`, en plus de `type_d7=4` déjà connu), observée sur
 2010 appels à `Nu_PutPlanetFeatureStart` contre 6638 pour le type 4 — piste à
 approfondir pour le décodage des features planétaires ("cercles" éventuels).
 
-## Scène d'intro, frame 2015 (planète visible en bas à droite)
+## Scène d'intro, frame 2015 : comparaison invalidée
 
-`08_planet_opengl_frame2015.png` (mode `R_GL`, après la correction du bug de
-"dôme sol" qui plantait un immense aplat gris/bleu sur l'écran à cette frame
-précise) et `09_planet_software_frame2015.png` (mode `R_OLD`, même scène,
-capturée sur un run séparé via Ctrl+E basculé avant frame 2015 - la scène
-reste statique sur plusieurs centaines de frames donc identique à l'oeil)
-montrent que le rendu OpenGL correspond maintenant au rendu logiciel original
-pour cette frame (petit croissant de planète en bas à droite, plus d'aplat
-parasite).
+Une tentative précédente de comparaison `R_GL`/`R_OLD` à la frame 2015,
+capturée sur deux lancements séparés du jeu (un par mode), a été retirée :
+les deux images ne montraient en réalité pas la même scène (un vaisseau avec
+ses réacteurs côté `R_GL`, la planète attendue côté `R_OLD`). Le numéro de
+frame atteint dans les logs de debug n'est donc pas suffisant pour garantir
+que deux processus distincts sont dans le même état de jeu au même instant
+(la séquence d'intro ne semble pas parfaitement déterministe d'un lancement
+à l'autre). Toute comparaison future devrait, comme pour la paire
+`06`/`07`, basculer de renderer via Ctrl+E **au sein d'un seul et même
+processus/run** plutôt que recouper deux lancements séparés par numéro de
+frame.
