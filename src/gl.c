@@ -1046,6 +1046,63 @@ static int clip_contour_near (GLdouble in[][3], int n, GLdouble out[][3], int ma
 	return m;
 }
 
+/* Generic homogeneous-clip-space polygon clipper (Sutherland-Hodgman),
+ * one half-space at a time: keeps the part of the polygon where
+ * a*x + b*y + c*z + d*w >= 0. Used to clip a contour against all six
+ * sides of the view frustum in clip space (see clip_contour_frustum
+ * below) - unlike clip_contour_near, which only clips the near plane in
+ * eye space, this also rejects points that are technically in front of
+ * the camera but so far off to the side (e.g. right at a sphere's
+ * silhouette, seen up close) that gluProject's perspective divide sends
+ * them wildly outside the viewport: a screen-space tessellator has no
+ * hardware clipping to save it from a single such vertex ballooning the
+ * whole filled polygon across most of the screen. */
+static int clip_contour_plane (GLdouble in[][4], int n, GLdouble out[][4], int maxout,
+				double a, double b, double c, double d)
+{
+	int i, k, m = 0;
+
+	for (i = 0; i < n; i++) {
+		const GLdouble *p = in[i];
+		const GLdouble *q = in[(i+1) % n];
+		double dp = a*p[0] + b*p[1] + c*p[2] + d*p[3];
+		double dq = a*q[0] + b*q[1] + c*q[2] + d*q[3];
+		int p_in = (dp >= 0.0);
+		int q_in = (dq >= 0.0);
+
+		if (p_in && m < maxout) {
+			for (k = 0; k < 4; k++) out[m][k] = p[k];
+			m++;
+		}
+		if ((p_in != q_in) && m < maxout) {
+			double t = dp / (dp - dq);
+			for (k = 0; k < 4; k++) out[m][k] = p[k] + t*(q[k] - p[k]);
+			m++;
+		}
+	}
+
+	return m;
+}
+
+/* Clip a contour (already transformed into clip space, i.e. multiplied by
+ * the full modelview*projection matrix but not yet perspective-divided)
+ * against all six frustum planes: -w<=x<=w, -w<=y<=w, -w<=z<=w. Returns
+ * the resulting vertex count, written to `out` (needs room for n+6). */
+static int clip_contour_frustum (GLdouble in[][4], int n, GLdouble out[][4], int maxout)
+{
+	static GLdouble tmp[MAX_TESS_VERTICES+6][4];
+	int m;
+
+	m = clip_contour_plane (in, n, tmp, MAX_TESS_VERTICES+6, 1,0,0,1);
+	m = clip_contour_plane (tmp, m, out, maxout, -1,0,0,1);
+	m = clip_contour_plane (out, m, tmp, MAX_TESS_VERTICES+6, 0,1,0,1);
+	m = clip_contour_plane (tmp, m, out, maxout, 0,-1,0,1);
+	m = clip_contour_plane (out, m, tmp, MAX_TESS_VERTICES+6, 0,0,1,1);
+	m = clip_contour_plane (tmp, m, out, maxout, 0,0,-1,1);
+
+	return m;
+}
+
 /* Clip, project and hand the current contour to the tessellator. The
  * projected coordinates must stay alive until gluTessEndPolygon, which is
  * why they go into the persistent tess_vertices[] pool. */
@@ -1692,10 +1749,12 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, in
 static void draw_planet_features (float size)
 {
 	int i, start;
-	GLdouble mv[16], pr[16];
+	GLdouble mv[16], pr[16], mvp[16];
 	GLint vp[4];
 	GLboolean had_cull_face;
 	static GLdouble tessv[MAX_PLANET_FEATURE_TESS_VERTS][3];
+	static GLdouble clipv[MAX_TESS_VERTICES][4];
+	static GLdouble clippedv[MAX_TESS_VERTICES+6][4];
 
 	if (planet_feature_count < 1) {
 		fprintf (stderr, "DEBUG draw_planet_features: EMPTY (count=%d) frame=%d\n", planet_feature_count, debug_frame_counter);
@@ -1722,6 +1781,18 @@ static void draw_planet_features (float size)
 	glGetDoublev (GL_PROJECTION_MATRIX, pr);
 	glGetIntegerv (GL_VIEWPORT, vp);
 
+	/* mvp = pr * mv (column-major), so a contour vertex only needs one
+	 * matrix-vector multiply to reach clip space (see below). */
+	{
+		int col, row, k;
+		for (col = 0; col < 4; col++)
+			for (row = 0; row < 4; row++) {
+				double s = 0.0;
+				for (k = 0; k < 4; k++) s += pr[k*4+row] * mv[col*4+k];
+				mvp[col*4+row] = s;
+			}
+	}
+
 	start = 0;
 	for (i = 1; i <= planet_feature_count; i++) {
 		if (i < planet_feature_count && !planet_feature_newchain[i]) continue;
@@ -1735,7 +1806,56 @@ static void draw_planet_features (float size)
 
 			if (i - start >= 3) {
 				int k = 0;
+				int n_clip = 0;
+				int n_clipped;
 
+				/* gluProject() never clips against the view frustum: a
+				 * contour vertex right at a close-up sphere's silhouette
+				 * is legitimately in front of the camera, but so far off
+				 * to the side that the perspective divide sends its
+				 * screen-space projection wildly outside the viewport
+				 * (huge/negative pixel coordinates). The GL_LINE_LOOP
+				 * outline below is drawn through the normal glVertex3f
+				 * pipeline, which the GPU clips correctly against the
+				 * frustum, but this tessellated fill builds its polygon
+				 * directly from gluProject's raw 2D output with no such
+				 * protection - so even a single such vertex can balloon
+				 * a small, correctly-shaped contour into a wedge that
+				 * sweeps across most of the screen for that frame.
+				 *
+				 * Fix it by clipping the contour ourselves, in
+				 * homogeneous clip space, against all six frustum planes
+				 * (Sutherland-Hodgman, see clip_contour_frustum) before
+				 * the perspective divide - the same technique used for
+				 * "complex" ship/station shapes (flush_contour), just
+				 * applied to the full frustum rather than only the near
+				 * plane, since these contours (unlike pre-transformed
+				 * ship geometry) can span very wide angles as seen from
+				 * up close. Perspective-divide and map to screen pixels
+				 * ourselves afterwards, feeding the already-clipped 2D
+				 * points straight to the tessellator. */
+				for (j = start; j < i && n_clip < MAX_TESS_VERTICES; j++) {
+					double ox = planet_feature_dir[j][0]*size;
+					double oy = planet_feature_dir[j][1]*size;
+					double oz = planet_feature_dir[j][2]*size;
+
+					clipv[n_clip][0] = mvp[0]*ox + mvp[4]*oy + mvp[8]*oz  + mvp[12];
+					clipv[n_clip][1] = mvp[1]*ox + mvp[5]*oy + mvp[9]*oz  + mvp[13];
+					clipv[n_clip][2] = mvp[2]*ox + mvp[6]*oy + mvp[10]*oz + mvp[14];
+					clipv[n_clip][3] = mvp[3]*ox + mvp[7]*oy + mvp[11]*oz + mvp[15];
+					n_clip++;
+				}
+
+				n_clipped = clip_contour_frustum (clipv, n_clip, clippedv, MAX_TESS_VERTICES+6);
+				if (getenv ("PF_DEBUG")) {
+					int jj;
+					fprintf (stderr, "DEBUG clip n_clip=%d n_clipped=%d\n", n_clip, n_clipped);
+					for (jj = 0; jj < n_clipped; jj++)
+						fprintf (stderr, "DEBUG clipped jj=%d xyzw=(%f,%f,%f,%f)\n", jj,
+							 clippedv[jj][0], clippedv[jj][1], clippedv[jj][2], clippedv[jj][3]);
+				}
+
+				if (n_clipped >= 3) {
 				complex_col[0] = planet_feature_col[start+1][0];
 				complex_col[1] = planet_feature_col[start+1][1];
 				complex_col[2] = planet_feature_col[start+1][2];
@@ -1752,14 +1872,16 @@ static void draw_planet_features (float size)
 				gluTessProperty (tobj, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_ODD);
 				gluTessBeginPolygon (tobj, NULL);
 				gluTessBeginContour (tobj);
-				for (j = start; j < i && k < MAX_PLANET_FEATURE_TESS_VERTS; j++) {
+				for (j = 0; j < n_clipped && k < MAX_PLANET_FEATURE_TESS_VERTS; j++) {
 					GLdouble *d = tessv[k];
+					double w = clippedv[j][3];
 
-					if (!gluProject (planet_feature_dir[j][0]*size,
-							  planet_feature_dir[j][1]*size,
-							  planet_feature_dir[j][2]*size,
-							  mv, pr, vp, &d[0], &d[1], &d[2]))
-						continue;
+					if (w > -1e-9 && w < 1e-9) continue;
+					d[0] = vp[0] + (clippedv[j][0]/w * 0.5 + 0.5) * vp[2];
+					d[1] = vp[1] + (clippedv[j][1]/w * 0.5 + 0.5) * vp[3];
+					d[2] = 0.0;
+					if (getenv ("PF_DEBUG"))
+						fprintf (stderr, "DEBUG tessv j=%d screen=(%f,%f)\n", j, d[0], d[1]);
 					k++;
 					gluTessVertex (tobj, d, d);
 				}
@@ -1770,6 +1892,7 @@ static void draw_planet_features (float size)
 				glPopMatrix ();
 				glMatrixMode (GL_MODELVIEW);
 				glPopMatrix ();
+				}
 			}
 
 			glLineWidth (2.0f);
@@ -1960,6 +2083,11 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 	 * true horizontal, which is what standing on a planet looks like. */
 	theta_max = asin (R/d > 1.0 ? 1.0 : R/d);
 
+	if (getenv ("PF_DEBUG"))
+		fprintf (stderr, "DEBUG horizon_cap centre=(%f,%f,%f) R=%f d=%f theta_max_deg=%f up=(%f,%f,%f) e1=(%f,%f,%f) e2=(%f,%f,%f)\n",
+			 centre[0], centre[1], centre[2], R, d, theta_max*180.0/M_PI,
+			 up[0], up[1], up[2], e1[0], e1[1], e1[2], e2[0], e2[1], e2[2]);
+
 	glShadeModel (GL_FLAT);
 	/* The cap is an open, convex surface: every screen pixel it covers is
 	 * covered exactly once, so face culling is unnecessary here (and
@@ -1979,6 +2107,31 @@ static void draw_horizon_cap (const double centre[3], double R, double d,
 		double t1 = theta_max * (1.0 - (1.0-f1)*(1.0-f1));
 		double c0 = cos (t0), s0 = sin (t0);
 		double c1 = cos (t1), s1 = sin (t1);
+
+		if (getenv ("PF_DEBUG") && (i == HORIZON_CAP_RINGS-1 || i == 0)) {
+			GLdouble mv[16], pr[16];
+			GLint vp2[4];
+			glGetDoublev (GL_MODELVIEW_MATRIX, mv);
+			glGetDoublev (GL_PROJECTION_MATRIX, pr);
+			glGetIntegerv (GL_VIEWPORT, vp2);
+			{
+				int jj;
+				for (jj = 0; jj <= HORIZON_CAP_SLICES; jj += 16) {
+					double a = 2.0*M_PI*(double) jj / HORIZON_CAP_SLICES;
+					double ca = cos (a), sa = sin (a);
+					double vv[3];
+					GLdouble sx, sy, sz;
+					int kk;
+					for (kk = 0; kk < 3; kk++) {
+						double tangent = e1[kk]*ca + e2[kk]*sa;
+						vv[kk] = -up[kk]*c1 + tangent*s1;
+					}
+					gluProject (GROUND_DOME_RADIUS*vv[0], GROUND_DOME_RADIUS*vv[1], GROUND_DOME_RADIUS*vv[2],
+						    mv, pr, vp2, &sx, &sy, &sz);
+					fprintf (stderr, "DEBUG ring i=%d j=%d screen=(%f,%f,%f)\n", i, jj, sx, sy, sz);
+				}
+			}
+		}
 
 		glBegin (GL_QUAD_STRIP);
 		for (j = 0; j <= HORIZON_CAP_SLICES; j++) {
@@ -2203,6 +2356,36 @@ void Nu_DrawPlanet (void **data)
 		else R += step;
 
 		if (R > 0.0 && d > 0.0 && d < R * PLANET_CAP_MAX_RATIO) {
+			/* The flat "ground dome" approximation below projects every
+			 * vertex at a fixed distance from the camera along its real
+			 * view direction: screen position only depends on that
+			 * direction, so this is exactly equivalent to the true
+			 * curved surface for any direction safely in front of the
+			 * camera. But when the planet sits far enough off the view
+			 * axis that (its angular offset + the cap's own angular
+			 * radius) exceeds 90 degrees, part of the cap ring is
+			 * actually behind the camera plane; unlike a real sphere
+			 * mesh (silhouetted for free by backface culling regardless
+			 * of viewing angle), this flat dome has no such fallback and
+			 * the near-perpendicular ring vertices blow up to wildly
+			 * off-screen coordinates, painting a huge chunk of the
+			 * screen with the cap's colour instead of the small, mostly
+			 * off-screen disc a real sphere would show. Guard against
+			 * this by checking the worst-case ring vertex (the one most
+			 * tilted towards the camera plane) stays comfortably in
+			 * front; if not, fall through to the full sphere path below,
+			 * which has no such blind spot. */
+			double up_z = -centre[2]/d;
+			double s_theta = R/d > 1.0 ? 1.0 : R/d;
+			double c_theta = sqrt (1.0 - s_theta*s_theta);
+			double side = sqrt (1.0 - up_z*up_z > 0.0 ? 1.0 - up_z*up_z : 0.0);
+			/* The dangerous case is the ring vertex tilted *towards* the
+			 * camera plane (tangent_z = +side), which pushes v_z towards
+			 * positive/behind-camera - so it is the *maximum* of v_z over
+			 * the ring, not the minimum, that must stay safely negative. */
+			double max_vz = -up_z*c_theta + side*s_theta;
+
+			if (max_vz < -0.05) {
 			/* We are close enough to a planet that its surface is the
 			 * ground under us - that is exactly the condition for the
 			 * sky backdrop too, so derive it from here rather than
@@ -2226,6 +2409,7 @@ void Nu_DrawPlanet (void **data)
 			draw_planet_features ((float) size * 1.002f);
 			glPopMatrix ();
 			return;
+			}
 		}
 	}
 
