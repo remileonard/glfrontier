@@ -746,6 +746,7 @@ enum NuPrimitive {
 	NU_2DLINE,
 	NU_PLANETFEATURESTART,
 	NU_PLANETFEATURE,
+	NU_PLANETATMOSPHERE,
 	NU_MAX
 };
 
@@ -1682,6 +1683,13 @@ static void planet_transform_normal (const GLfloat rot_matrix[16], const float n
 static float planet_feature_dir[MAX_PLANET_FEATURE_VERTS][3];
 static unsigned char planet_feature_col[MAX_PLANET_FEATURE_VERTS][3];
 static char planet_feature_newchain[MAX_PLANET_FEATURE_VERTS];
+/* Real per-chain "feature type" byte fe2.s reads from the model data at
+ * L3d3f0 (see Nu_PutPlanetFeatureStart) - only ever set on the chain's
+ * first ("moveto") vertex, since it applies to the whole contour. Used
+ * by draw_planet_features() to tell land-mass contours apart from
+ * sea/background ones (see there), never to invent a colour. */
+static int planet_feature_type[MAX_PLANET_FEATURE_VERTS];
+static int planet_feature_pending_type;
 static int planet_feature_count;
 int debug_frame_counter;
 
@@ -1713,6 +1721,7 @@ static void planet_feature_push (int rawx, int rawy, int rawz, int rgb444col, in
 	planet_feature_col[planet_feature_count][0] = (unsigned char) r;
 	planet_feature_col[planet_feature_count][1] = (unsigned char) g;
 	planet_feature_col[planet_feature_count][2] = (unsigned char) b;
+	planet_feature_type[planet_feature_count] = newchain ? planet_feature_pending_type : 0;
 	planet_feature_newchain[planet_feature_count] = newchain;
 	planet_feature_count++;
 }
@@ -1856,9 +1865,35 @@ static void draw_planet_features (float size)
 				}
 
 				if (n_clipped >= 3) {
-				complex_col[0] = planet_feature_col[start+1][0];
-				complex_col[1] = planet_feature_col[start+1][1];
-				complex_col[2] = planet_feature_col[start+1][2];
+				/* Fill colour: fe2.s's own "feature type" byte (see
+				 * Nu_PutPlanetFeatureStart) toggles bit 3 (real
+				 * observed values are 4 = land, 12 = sea/background -
+				 * the two only differ by that bit) each time a
+				 * contour boundary is crossed during the ST's own
+				 * span rasteriser (L3ddc0/l3e02e, "eor.w d0,212(a3)"
+				 * - see the design-notes comment above draw_3dview
+				 * for the full trace). Confirmed against a genuine
+				 * R_OLD screenshot at intro frame 2286 (see
+				 * docs/debug-screenshots/): the single coastline
+				 * chain visible there is captured with type_d7=4, and
+				 * the OLD renderer fills it green (a real continent),
+				 * not the type_d7=12 chains seen elsewhere. We
+				 * reproduce that same real distinction here rather
+				 * than always filling every contour with the
+				 * coastline stroke's hardcoded $777 gray (which is
+				 * only ever the *outline* colour, drawn separately
+				 * below regardless of type): land contours get a
+				 * real, plausible green (matching the ST's own
+				 * rendered land colour, sampled from that same real
+				 * R_OLD screenshot), sea/background contours are left
+				 * unfilled so the planet's own ocean/base sphere
+				 * colour shows through underneath, exactly as the OLD
+				 * renderer's ocean is just the planet's base colour
+				 * with no separate fill of its own. */
+				if (!(planet_feature_type[start] & 8)) {
+				complex_col[0] = 64;
+				complex_col[1] = 160;
+				complex_col[2] = 64;
 
 				glMatrixMode (GL_PROJECTION);
 				glPushMatrix ();
@@ -1892,6 +1927,7 @@ static void draw_planet_features (float size)
 				glPopMatrix ();
 				glMatrixMode (GL_MODELVIEW);
 				glPopMatrix ();
+				}
 				}
 			}
 
@@ -2205,24 +2241,31 @@ void Nu_PutPlanetFeatureStart ()
 	 * out, from real game data, which values actually occur - negative
 	 * values route to fe2.s's separate "circles on planet surface"
 	 * code (l3db7c) that draw_planet_features()/this hcall pair never
-	 * captures at all today. */
+	 * captures at all today. Real observed values are 4 (majority) and
+	 * 12 (minority) - draw_planet_features() now uses this real,
+	 * per-chain value (never an invented one) to tell land-mass
+	 * contours apart from sea/background ones when filling. */
 	fprintf (stderr, "DEBUG Nu_PutPlanetFeatureStart frame=%d type_d7=%d\n", debug_frame_counter, reg_word_s16 (REG_D7));
 	znode_wrlong (NU_PLANETFEATURESTART);
 	znode_wrlong (reg_word_s16 (REG_D3));
 	znode_wrlong (reg_word_s16 (REG_D4));
 	znode_wrlong (reg_word_s16 (REG_D5));
+	znode_wrlong (reg_word_s16 (REG_D7));
 }
 void Nu_DrawPlanetFeatureStart (void **data)
 {
-	int x, y, z;
+	int x, y, z, type;
 	x = znode_rdlong (data);
 	y = znode_rdlong (data);
 	z = znode_rdlong (data);
+	type = znode_rdlong (data);
 	/* This is only ever a "moveto": fe2.s never draws a visible segment
 	 * for it (see draw_planet_features, which only colours the
 	 * *ending* vertex of a segment), so no real d7 colour has been set
 	 * by the 68k code yet at this point - the colour value stored here
-	 * is unused for rendering. */
+	 * is unused for rendering. The real per-chain feature *type* byte
+	 * (captured above, before it gets overwritten) is used though. */
+	planet_feature_pending_type = type;
 	planet_feature_push (x, y, z, 0, 1);
 }
 
@@ -2247,6 +2290,38 @@ void Nu_DrawPlanetFeature (void **data)
 	z = znode_rdlong (data);
 	col = znode_rdlong (data);
 	planet_feature_push (x, y, z, col, 0);
+}
+
+/* Real atmosphere/limb-halo colour.
+ *
+ * fe2.s's L3da2e_AtmosphereColNShit picks this colour from the ST's own
+ * per-tick "light tint" ramp table (L60f6_light_tint_table+8), indexed by
+ * how directly the planet's sun-facing side points at the viewer - the
+ * same routine that (only for planets close/large enough) also tints the
+ * whole screen background to fake "looking through the atmosphere at the
+ * ground" (see fe2_bgcol/set_gl_clear_col). But it always computes and
+ * stores this colour for the *current* planet regardless of that size
+ * check, and the original renderer also uses it to paint a limb/halo band
+ * around the planet's own disc with additional Bezier curves - a distinct
+ * rendering step our sphere mesh never reproduced. This hcall captures
+ * that exact ST-computed colour (never invented on the GL side) so
+ * Nu_DrawPlanet can draw the same halo. Emitted once per planet, before
+ * its Nu_PutPlanet entry - like the coastline hcalls - so we just buffer
+ * it and consume/reset it from within Nu_DrawPlanet. */
+static int planet_atmosphere_col;
+static int planet_atmosphere_valid;
+
+void Nu_PutPlanetAtmosphere ()
+{
+	if (use_renderer == R_OLD) return;
+	fprintf (stderr, "DEBUG Nu_PutPlanetAtmosphere frame=%d col=%03x\n", debug_frame_counter, reg_word_s16 (REG_D7) & 0xfff);
+	znode_wrlong (NU_PLANETATMOSPHERE);
+	znode_wrlong (reg_word_s16 (REG_D7));
+}
+void Nu_DrawPlanetAtmosphere (void **data)
+{
+	planet_atmosphere_col = znode_rdlong (data);
+	planet_atmosphere_valid = 1;
 }
 
 /* not finished by a long shot */
@@ -2276,6 +2351,49 @@ void Nu_PutPlanet ()
 	znode_wrvertex (GetReg (REG_A0)+4);
 	znode_wrmatrix (GetReg (REG_A6)-36);
 }
+
+/* Draws the real atmosphere/limb halo captured via Nu_PutPlanetAtmosphere,
+ * as a thin solid-colour band right at the planet's silhouette.
+ *
+ * The original ST renderer paints this as extra Bezier curves just
+ * outside the planet's own outline (see fe2.s L3da2e_AtmosphereColNShit
+ * and the "atmospheric bands" rendering path) - a 2D screen-space effect
+ * we have no equivalent 2D outline for here. Since depth testing is
+ * permanently off in this renderer (painter's algorithm, see
+ * draw_3dview), a solid, unlit, slightly larger sphere drawn *before* the
+ * real planet (which is then painted fully opaque on top) leaves exactly
+ * a thin ring of the larger sphere visible around the smaller one's
+ * silhouette - this is the standard "fake atmosphere shell" trick, and
+ * reuses the exact same real sphere geometry/size already computed for
+ * the planet, just scaled outward, so no new geometry/pattern is
+ * invented - only the real captured ST colour decides what shows through
+ * the ring. */
+#define PLANET_HALO_SCALE	1.025f
+
+static void draw_planet_halo (float size)
+{
+	int r, g, b;
+	GLboolean cull_was_on;
+
+	if (!planet_atmosphere_valid) return;
+
+	split_rgb444b (planet_atmosphere_col, &r, &g, &b);
+
+	/* Guard against whatever cull-face state a caller left active: a
+	 * fully backface-culled sphere would only show its front half,
+	 * chopping the halo ring in two - see draw_planet_features for the
+	 * same precedent/reasoning. */
+	cull_was_on = glIsEnabled (GL_CULL_FACE);
+	glDisable (GL_CULL_FACE);
+	glDisable (GL_LIGHTING);
+	glColor3ub ((unsigned char) r, (unsigned char) g, (unsigned char) b);
+	gluQuadricDrawStyle (qobj, GLU_FILL);
+	gluQuadricNormals (qobj, GLU_NONE);
+	gluSphere (qobj, size * PLANET_HALO_SCALE, NUSPHERE_SLICES, NUSPHERE_STACKS);
+	if (cull_was_on) glEnable (GL_CULL_FACE);
+	planet_atmosphere_valid = 0;
+}
+
 void Nu_DrawPlanet (void **data)
 {
 	int v1[3];
@@ -2391,6 +2509,14 @@ void Nu_DrawPlanet (void **data)
 			 * sky backdrop too, so derive it from here rather than
 			 * from a game flag. Picked up by the next frame. */
 			planet_ground_seen = 1;
+			/* Halo drawn first (and slightly larger), in plain camera
+			 * space like draw_horizon_cap itself - the opaque ground
+			 * cap painted right after covers its centre, leaving only
+			 * the real atmosphere colour showing as a thin limb ring. */
+			glPushMatrix ();
+			glTranslatef (v1[0], v1[1], v1[2]);
+			draw_planet_halo ((float) size);
+			glPopMatrix ();
 			draw_horizon_cap (centre, R, d, light_dir, dark, lit);
 			/* The coastline contours are captured in the planet's own
 			 * local (pre-rotation) model space, exactly like the full
@@ -2418,6 +2544,7 @@ void Nu_DrawPlanet (void **data)
 	glRotatef (180.0f, 1, 0, 0);
 	glRotatef (180.0f, 0, 1, 0);
 	glMultMatrixf (rot_matrix);
+	draw_planet_halo ((float) size);
 	glCullFace (GL_BACK);
 	glEnable (GL_CULL_FACE);
 	draw_banded_sphere ((float) size, rot_matrix, light_dir, dark, lit);
@@ -2751,7 +2878,8 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_DrawPoint,
 	&Nu_Draw2DLine,
 	&Nu_DrawPlanetFeatureStart,
-	&Nu_DrawPlanetFeature
+	&Nu_DrawPlanetFeature,
+	&Nu_DrawPlanetAtmosphere
 };
 
 /*

@@ -63,6 +63,7 @@ Nu_PutPlanet		equ	$78
 Nu_Draw2DLine		equ	$79
 Nu_PutPlanetFeatureStart	equ	$7a
 Nu_PutPlanetFeature	equ	$7b
+Nu_PutPlanetAtmosphere	equ	$7c
 
 * don't change. it won't work yet.
 SCR_W			equ	320
@@ -17604,6 +17605,15 @@ L3da2e_AtmosphereColNShit:
 		moveq	#6,d0
 	l3da62:	lea	-104(a6),a0
 		move.w	8(a0,d0.w),204(a3)
+		* real atmosphere/halo colour just picked from the ST's own
+		* per-tick light tint ramp table (L60f6_light_tint_table+8,
+		* indexed by sun-facing angle) - hcall is read-only (never
+		* calls SetReg) so it is a no-op for R_OLD. d0-d6/a0 are all
+		* still needed below so save them around the call.
+		movem.l	d0-6/a0,-(a7)
+		move.w	204(a3),d7
+		hcall	#Nu_PutPlanetAtmosphere
+		movem.l	(a7)+,d0-6/a0
 		tst.w	d0
 		bpl.s	l3da96
 		cmpi.w	#$5,206(a3)

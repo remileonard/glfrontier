@@ -1072,7 +1072,8 @@ HOSTCALL hcalls[] = {
 	Nu_PutPlanet,
 	Nu_Put2DLine,
 	Nu_PutPlanetFeatureStart,
-	Nu_PutPlanetFeature
+	Nu_PutPlanetFeature,
+	Nu_PutPlanetAtmosphere
 #else
 	not_available,
 	not_available,
@@ -1094,6 +1095,7 @@ HOSTCALL hcalls[] = {
 	not_available,
 	not_available,
 	Nu_IsGLRenderer,
+	not_available,
 	not_available,
 	not_available,
 	not_available,
