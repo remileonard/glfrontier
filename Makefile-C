@@ -16,7 +16,7 @@ LIBS := -lvorbisfile -lvorbis -logg $(SDL_LIBS) -lSDL_image
 
 WITH_GL=y
 ifeq ($(WITH_GL),y)
-	SRCOBJS += gl.o
+	SRCOBJS += gl.o planet.o
 	LIBS += -lGL -lGLU
 	CFLAGS += -DWITH_GL
 else

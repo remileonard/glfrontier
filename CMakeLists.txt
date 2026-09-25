@@ -86,7 +86,7 @@ set(FRONTIER_SOURCES
 )
 
 if(WITH_GL)
-	list(APPEND FRONTIER_SOURCES src/gl.c)
+	list(APPEND FRONTIER_SOURCES src/gl.c src/planet.c)
 else()
 	list(APPEND FRONTIER_SOURCES src/soft.c)
 endif()
@@ -108,6 +108,12 @@ target_link_libraries(frontier PRIVATE
 	PkgConfig::VORBIS
 	PkgConfig::OGG
 )
+
+# gl.c / hostcall.c use sqrt, sin, cos... from libm, which is a separate
+# library on Linux (it is part of libSystem on macOS).
+if(UNIX AND NOT APPLE)
+	target_link_libraries(frontier PRIVATE m)
+endif()
 
 if(WITH_OGG_MUSIC)
 	target_compile_definitions(frontier PRIVATE OGG_MUSIC)
