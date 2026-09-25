@@ -61,6 +61,9 @@ Nu_PutCylinder		equ	$76
 Nu_PutBlob		equ	$77
 Nu_PutPlanet		equ	$78
 Nu_Draw2DLine		equ	$79
+Nu_ComplexAbort		equ	$7a
+Nu_ZTreePush		equ	$7b
+Nu_ZTreePop		equ	$7c
 
 * don't change. it won't work yet.
 SCR_W			equ	320
@@ -12510,7 +12513,9 @@ L3a202:
 		rts
 
 	* this is the detail of Z-sorting i have not implemented...
-	l3a494:	lea	L385d0_3dview_thing2,a0
+	* End of a nested z-tree: go back to sorting into the parent one.
+	l3a494:	hcall	#Nu_ZTreePop
+		lea	L385d0_3dview_thing2,a0
 		move.l	4(a0),0(a0)
 		move.l	8(a0),4(a0)
 		move.l	12(a0),8(a0)
@@ -12564,6 +12569,10 @@ L3a4b4:
 		move.l	4(a2),8(a2)
 		move.l	0(a2),4(a2)
 		move.l	a1,L385d0_3dview_thing2
+		* The node just inserted becomes the root of a nested z-tree:
+		* what follows is sorted within it, and painted as one block at
+		* its place in the parent tree.
+		hcall	#Nu_ZTreePush
 		moveq	#0,d0
 		moveq	#0,d1
 		moveq	#0,d2
@@ -14355,6 +14364,11 @@ L3b7ac:
 		dc.w	L3b7a4-L3b7ac
 
 L3b7ba:
+		* The complex polygon crosses the near plane and its model says
+		* to drop it altogether in that case (bit 7 of -186(a6), see
+		* l3b87e): the 2D primitives already pushed are thrown away below.
+		* Tell the GL renderer to forget the ones it was given too.
+		hcall	#Nu_ComplexAbort
 		addq.l	#1,a5
 		move.l	-190(a6),L385c8_primitives_end
 		movea.l	L385c8_primitives_end,a0

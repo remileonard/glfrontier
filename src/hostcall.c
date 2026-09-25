@@ -1070,7 +1070,10 @@ HOSTCALL hcalls[] = {
 	Nu_PutCylinder,
 	Nu_PutBlob,
 	Nu_PutPlanet,
-	Nu_Put2DLine
+	Nu_Put2DLine,
+	Nu_ComplexAbort,
+	Nu_ZTreePush,
+	Nu_ZTreePop
 #else
 	not_available,
 	not_available,
@@ -1092,6 +1095,9 @@ HOSTCALL hcalls[] = {
 	not_available,
 	not_available,
 	Nu_IsGLRenderer,
+	not_available,
+	not_available,
+	not_available,
 	not_available,
 	not_available,
 	not_available,

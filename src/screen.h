@@ -80,6 +80,9 @@ extern void Nu_PutCylinder ();
 extern void Nu_PutBlob ();
 extern void Nu_PutPlanet ();
 extern void Nu_Put2DLine ();
+extern void Nu_ComplexAbort ();
+extern void Nu_ZTreePush ();
+extern void Nu_ZTreePop ();
 
 extern int screen_w;
 extern int screen_h;

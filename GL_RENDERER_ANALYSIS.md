@@ -175,6 +175,27 @@ subdivision, pas de la profondeur atteinte (qui, elle, dépend de la vue).
 Vérifié contre le renderer logiciel sur l'intro (planète avec continent,
 terminateur, liseré) et posé sur Merlin (bandes de ciel).
 
+### 6b. Marquages au sol des astroports invisibles (corrigé)
+
+Pistes, routes et lacs des astroports n'apparaissaient pas en GL : un grand
+polygone de terrain vert, situé *sous* l'astroport, était peint par-dessus.
+
+Cause : le jeu ne trie pas tout dans un seul arbre de profondeur. La
+commande objet $15 (`L3a4b4`) insère un nœud et en fait la racine d'un
+**sous-arbre** ; tout ce qui suit y est trié jusqu'au dépilement
+(`l3a494`, commenté « this is the detail of Z-sorting i have not
+implemented... »), et le sous-arbre est peint d'un bloc à la place de ce
+nœud. Le renderer GL aplatissait tout dans un arbre global, ce qui
+changeait l'ordre entre le terrain de fond et le groupe des décors au sol.
+
+Correctif : hostcalls `Nu_ZTreePush` / `Nu_ZTreePop` (0x7b / 0x7c) et
+primitive `NU_SUBTREE` dans gl.c, qui reproduisent les arbres imbriqués.
+
+Au passage : quand un polygone complexe marqué pour cela (bit 7 de
+`-186(a6)`) traverse le plan proche, le jeu l'abandonne et efface ce qu'il
+avait déjà émis (`L3b7ba`). Le hostcall `Nu_ComplexAbort` (0x7a) fait
+oublier ce polygone au renderer GL aussi (cas non rencontré dans l'intro).
+
 ### 7. `Nu_PutOval` / `Nu_DrawOval` — "this primitive is WRONG"
 
 [src/gl.c](src/gl.c#L1611-L1642)

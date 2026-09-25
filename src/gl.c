@@ -745,6 +745,7 @@ enum NuPrimitive {
 	NU_OVALTHINGY,
 	NU_POINT,
 	NU_2DLINE,
+	NU_SUBTREE,
 	NU_MAX
 };
 
@@ -785,16 +786,58 @@ static void znode_insert (struct ZNode *node, unsigned int zval)
 
 static bool no_znodes_kthx;
 
+/*
+ * Nested z-trees.
+ *
+ * The engine does not sort everything in one tree: object command $15
+ * (fe2.s L3a4b4) inserts a node and makes it the root of a new tree, into
+ * which everything that follows is sorted, until the matching pop
+ * (l3a494). The whole sub-tree is then painted as one block, at the place
+ * of that node in the parent tree. Starports rely on it: their ground
+ * decals (runways, roads, lakes) and the big terrain polygons around them
+ * only come out in the right order that way.
+ */
+#define MAX_SUBTREES		256
+#define MAX_ZTREE_DEPTH		16
+static struct ZNode *subtree_root[MAX_SUBTREES];
+static int num_subtrees;
+/* the tree Nu_InsertZNode sorts into */
+static struct ZNode **cur_ztree = &znode_start;
+static struct ZNode **ztree_stack[MAX_ZTREE_DEPTH];
+/* may exceed MAX_ZTREE_DEPTH, to keep pushes and pops balanced */
+static int ztree_depth;
+
 void Nu_InsertZNode ()
 {
 	unsigned int zval = GetReg (4);
 	if (use_renderer == R_OLD) return;
 	if (no_znodes_kthx) return;
-	if (znode_start == NULL) {
-		add_node (&znode_start, zval);
+	if (*cur_ztree == NULL) {
+		add_node (cur_ztree, zval);
 	} else {
-		znode_insert (znode_start, zval);
+		znode_insert (*cur_ztree, zval);
 	}
+}
+
+void Nu_ZTreePush ()
+{
+	if (use_renderer == R_OLD) return;
+	if (ztree_depth++ >= MAX_ZTREE_DEPTH) return;
+	ztree_stack[ztree_depth-1] = cur_ztree;
+	/* out of sub-trees, or nothing to hang it on: keep sorting flat */
+	if (num_subtrees == MAX_SUBTREES || !znode_cur) return;
+	subtree_root[num_subtrees] = NULL;
+	/* the node the engine just inserted draws the sub-tree */
+	znode_wrlong (NU_SUBTREE);
+	znode_wrlong (num_subtrees);
+	cur_ztree = &subtree_root[num_subtrees++];
+}
+
+void Nu_ZTreePop ()
+{
+	if (use_renderer == R_OLD) return;
+	if (ztree_depth == 0) return;
+	if (--ztree_depth < MAX_ZTREE_DEPTH) cur_ztree = ztree_stack[ztree_depth];
 }
 
 void Nu_3DViewInit ()
@@ -809,6 +852,9 @@ void Nu_3DViewInit ()
 	znode_start = NULL;
 	znode_cur = NULL;
 	no_znodes_kthx = FALSE;
+	num_subtrees = 0;
+	cur_ztree = &znode_start;
+	ztree_depth = 0;
 }
 
 static void lighting_on (float light_vec[4], int rgb444_light_col, int rgb444_extra_col, int rgb444_obj_col)
@@ -971,9 +1017,14 @@ static GLint tessViewport[4];
 
 static bool do_start_complex;
 static int complex_col_rgb444;
+/* where the current complex shape starts in obj_data_area, -1 if nothing
+ * written yet; and whether the engine dropped it (Nu_ComplexAbort) */
+static int complex_data_start = -1;
+static bool complex_aborted;
 
 static void put_complex_start_4real ()
 {
+	complex_data_start = obj_data_pos;
 	znode_wrlong (NU_COMPLEX_START);
 	znode_wrcolor (complex_col_rgb444);
 	no_znodes_kthx = TRUE;
@@ -1101,6 +1152,8 @@ void Nu_ComplexStart ()
 	if (use_renderer == R_OLD) return;
 	do_start_complex = TRUE;
 	complex_col_rgb444 = GetReg (REG_D6);
+	complex_data_start = -1;
+	complex_aborted = FALSE;
 }
 void Nu_DrawComplexStart (void **data)
 {
@@ -1136,6 +1189,13 @@ void Nu_DrawComplexStart (void **data)
 void Nu_ComplexEnd ()
 {
 	if (use_renderer == R_OLD) return;
+	if (complex_aborted) {
+		/* already forgotten, see Nu_ComplexAbort */
+		complex_aborted = FALSE;
+		do_start_complex = FALSE;
+		no_znodes_kthx = FALSE;
+		return;
+	}
 	if (do_start_complex) { put_complex_start_4real (); do_start_complex = FALSE; }
 	znode_wrlong (NU_COMPLEX_END);
 	do_start_complex = FALSE;
@@ -1156,6 +1216,23 @@ void Nu_DrawComplexEnd (void **data)
 		glVertex3dv (tess_vertices[0]);
 		glEnd ();
 	}
+}
+
+/*
+ * Some complex shapes are flagged in their model to be dropped altogether
+ * when they cross the near plane (fe2.s l3b87e -> L3b78e -> L3b7ba): the
+ * engine then throws away the 2D primitives it had already pushed for the
+ * shape. Forget whatever we were given for it as well: nothing else can
+ * have been written since it started, as no_znodes_kthx keeps it in the
+ * current znode. Nu_ComplexEnd still follows.
+ */
+void Nu_ComplexAbort ()
+{
+	if (use_renderer == R_OLD) return;
+	if (complex_data_start >= 0) obj_data_pos = complex_data_start;
+	complex_data_start = -1;
+	do_start_complex = FALSE;
+	complex_aborted = TRUE;
 }
 
 void Nu_ComplexStartInner ()
@@ -2678,7 +2755,8 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_DrawBlob,
 	&Nu_DrawOval,
 	&Nu_DrawPoint,
-	&Nu_Draw2DLine
+	&Nu_Draw2DLine,
+	NULL	/* NU_SUBTREE, see Nu_DrawPrimitive */
 };
 
 /*
@@ -2687,6 +2765,8 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
  * logos, panels, vector text, complex shape fills...). Just replay that
  * order - see draw_3dview for why there is no depth test to fight with.
  */
+static void draw_3dview (struct ZNode *node);
+
 static void Nu_DrawPrimitive (void *data)
 {
 	int fnum;
@@ -2695,6 +2775,10 @@ static void Nu_DrawPrimitive (void *data)
 		fnum = znode_rdlong (&data);
 		//fprintf (stderr, "%d ", fnum);
 		if (!fnum) return;
+		if (fnum == NU_SUBTREE) {
+			draw_3dview (subtree_root[znode_rdlong (&data)]);
+			continue;
+		}
 		nu_drawfuncs[fnum] (&data);
 	}
 }
