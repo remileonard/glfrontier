@@ -746,6 +746,7 @@ enum NuPrimitive {
 	NU_POINT,
 	NU_2DLINE,
 	NU_SUBTREE,
+	NU_ATMOSPHERE,
 	NU_MAX
 };
 
@@ -782,6 +783,36 @@ static void znode_insert (struct ZNode *node, unsigned int zval)
 			add_node (&node->less, zval);
 		}
 	}
+}
+
+/*
+ * Detached znodes: a node whose data does not go into the obj_data_area
+ * stream, so that it can be added to the tree in the middle of another
+ * primitive without cutting the current node's data short (add_node ends
+ * the current node). Their data is written in one go.
+ */
+#define MAX_DETACHED_DATA	(1<<16)
+static unsigned char detached_data[MAX_DETACHED_DATA];
+static int detached_pos;
+
+static void *add_detached_node (struct ZNode **root, unsigned int zval, int size)
+{
+	struct ZNode *n, **link = root;
+	void *data;
+
+	if (znode_buf_pos >= MAX_ZNODES || detached_pos + size + 4 > MAX_DETACHED_DATA)
+		return NULL;
+	n = &znode_buf[znode_buf_pos++];
+	n->z = zval;
+	n->less = n->more = NULL;
+	n->data = data = &detached_data[detached_pos];
+	detached_pos += size + 4;
+	/* the list end */
+	*(int *) ((unsigned char *) data + size) = 0;
+	/* same ordering as znode_insert */
+	while (*link) link = zval > (*link)->z ? &(*link)->more : &(*link)->less;
+	*link = n;
+	return data;
 }
 
 static bool no_znodes_kthx;
@@ -847,6 +878,7 @@ void Nu_3DViewInit ()
 	znode_buf_pos = 0;
 	//printf ("%d bytes object data\n", obj_data_pos);
 	obj_data_pos = 0;
+	detached_pos = 0;
 
 	//add_node (&znode_start, 0);
 	znode_start = NULL;
@@ -2367,6 +2399,55 @@ void Nu_PutPlanet ()
 	znode_wrlong (NU_PLANET);
 	memcpy (obj_data_area + obj_data_pos, &p, sizeof (p));
 	obj_data_pos += sizeof (p);
+
+	/* The ST draws each atmosphere layer as a primitive of its own,
+	 * inserted at the very back (moveq #-1,d4 in L3d8f4): it is a
+	 * backdrop, painted before everything else, other planets and their
+	 * rings included. Painted with the planet surface, the sky bands of
+	 * the planet we are standing on would hide the planets in its sky. */
+	if (p.natm) {
+		unsigned char *a = add_detached_node (cur_ztree, 0xffffffff, 4 + sizeof (p));
+		if (a) {
+			*(int *) a = NU_ATMOSPHERE;
+			memcpy (a + 4, &p, sizeof (p));
+		}
+	}
+}
+
+/* De-quantize the radius.
+ *
+ * planet_rad (fe2.s L3ce38) is rebuilt as
+ *	asr.l d5,d0 ... asl.l d4,d0
+ * so its low d4 bits are gone: what we get is a multiple of 2^d4 and the
+ * true radius lies somewhere in [R, R + 2^d4). Landed on Mars that is a
+ * step of 131072, while the whole apparent "altitude" fits inside a single
+ * quantization step. So recover the step from the trailing zero bits and
+ * pick the value of the interval that is still physically possible: we can
+ * never be below the surface, so clamp to d. */
+static void planet_fix_radius (struct PlanetPrim *p, double d)
+{
+	unsigned int q = (unsigned int) p->R;
+	double step = 1.0;
+	while (q && !(q & 1)) { q >>= 1; step *= 2.0; }
+	if (p->R + step > d) p->R = d;
+	else p->R += step;
+}
+
+/* The atmosphere layers, in their own znode: see Nu_PutPlanet. */
+void Nu_DrawAtmosphere (void **data)
+{
+	struct PlanetPrim p;
+	double d;
+
+	memcpy (&p, *data, sizeof (p));
+	*data += sizeof (p);
+	d = sqrt (pdot (p.centre, p.centre));
+	if (p.R <= 0.0 || d <= 0.0) return;
+	planet_fix_radius (&p, d);
+	glDisable (GL_LIGHTING);
+	glDisable (GL_CULL_FACE);
+	glShadeModel (GL_SMOOTH);
+	draw_planet_atmosphere (&p, d);
 }
 
 void Nu_DrawPlanet (void **data)
@@ -2382,25 +2463,7 @@ void Nu_DrawPlanet (void **data)
 
 	d = sqrt (pdot (p.centre, p.centre));
 	if (p.R <= 0.0 || d <= 0.0) return;
-
-	/* De-quantize the radius.
-	 *
-	 * planet_rad (fe2.s L3ce38) is rebuilt as
-	 *	asr.l d5,d0 ... asl.l d4,d0
-	 * so its low d4 bits are gone: what we get is a multiple of 2^d4 and
-	 * the true radius lies somewhere in [R, R + 2^d4). Landed on Mars
-	 * that is a step of 131072, while the whole apparent "altitude" fits
-	 * inside a single quantization step. So recover the step from the
-	 * trailing zero bits and pick the value of the interval that is
-	 * still physically possible: we can never be below the surface, so
-	 * clamp to d. */
-	{
-		unsigned int q = (unsigned int) p.R;
-		double step = 1.0;
-		while (q && !(q & 1)) { q >>= 1; step *= 2.0; }
-		if (p.R + step > d) p.R = d;
-		else p.R += step;
-	}
+	planet_fix_radius (&p, d);
 
 	/* We are close enough to a planet that its surface is the ground
 	 * under us - that is exactly the condition for the sky backdrop too,
@@ -2415,8 +2478,6 @@ void Nu_DrawPlanet (void **data)
 	glDisable (GL_LIGHTING);
 	glDisable (GL_CULL_FACE);
 	glShadeModel (GL_SMOOTH);
-
-	draw_planet_atmosphere (&p, d);
 
 	glEnable (GL_TEXTURE_2D);
 	glTexEnvi (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
@@ -2756,7 +2817,8 @@ NU_DRAWFUNC nu_drawfuncs[NU_MAX] = {
 	&Nu_DrawOval,
 	&Nu_DrawPoint,
 	&Nu_Draw2DLine,
-	NULL	/* NU_SUBTREE, see Nu_DrawPrimitive */
+	NULL,	/* NU_SUBTREE, see Nu_DrawPrimitive */
+	&Nu_DrawAtmosphere
 };
 
 /*
