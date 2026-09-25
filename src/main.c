@@ -201,6 +201,8 @@ void Main_ReadParameters(int argc, char *argv[])
                "  --nosound             Disable sound (faster!).\n"
                "  --size w h            Start at specified window size.\n"
 			   "  --old-renderer        Start with the old renderer.\n"
+			   "  --detail-boost n      Draw model details up to 2^n times further\n"
+			   "                        than the chosen Level of Shape Detail.\n"
               );
         exit(0);
       }
@@ -214,6 +216,13 @@ void Main_ReadParameters(int argc, char *argv[])
       }
 	  else if (!strcmp(argv[i], "--old-renderer"))
 		use_renderer = R_OLD;
+	  else if (!strcmp(argv[i], "--detail-boost"))
+	  {
+		extern int detail_boost;
+		if (++i < argc) detail_boost = atoi (argv[i]);
+		if (detail_boost < 0) detail_boost = 0;
+		if (detail_boost > 8) detail_boost = 8;
+	  }
       else if ( !strcmp(argv[i],"--size") )
       {
 	screen_h = 0;

@@ -35,6 +35,7 @@ Call_Fdelete		equ	$24
 Call_Fopendir		equ	$25
 Call_Freaddir		equ	$26
 Call_Fclosedir		equ	$27
+Call_DetailBoost	equ	$28
 Nu_PutTriangle		equ	$60
 Nu_PutQuad		equ	$61
 Nu_PutLine		equ	$62
@@ -48306,7 +48307,9 @@ L725d4_SetDetailOpts:
 		moveq	#1,d1
 		moveq	#2,d2
 		moveq	#0,d3
-	l72608:	move.w	d1,A6_optdetail1(a6)
+	* let the host push the shape detail distances further (d1, d2)
+	l72608:	hcall	#Call_DetailBoost
+		move.w	d1,A6_optdetail1(a6)
 		move.w	d2,A6_optdetail2(a6)
 		move.w	d3,A6_optdetail3(a6)
 		move.b	10460(a6),10468(a6)

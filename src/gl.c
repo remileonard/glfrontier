@@ -556,10 +556,10 @@ struct ZNode {
 	void *data;
 };
 
-#define MAX_OBJ_DATA	(2<<17)
+#define MAX_OBJ_DATA	(4<<20)
 static unsigned char obj_data_area[MAX_OBJ_DATA];
 static int obj_data_pos;
-#define MAX_ZNODES	1000
+#define MAX_ZNODES	16384
 static struct ZNode znode_buf[MAX_ZNODES];
 static int znode_buf_pos;
 static struct ZNode *znode_start;
@@ -2389,7 +2389,12 @@ void Nu_PutPlanet ()
 	/* the planet object's random seed (L3d3f0) */
 	p.seed = STMemory_ReadLong (STMemory_ReadLong (a6 - 212) + 118);
 	p.radius_word = (STMemory_ReadLong (model - 4) >> 16) & 0xffff;
-	p.detail = (short) GetReg (REG_D2);
+	/* the fractal coast lines depend on it: keep them the same whatever
+	 * --detail-boost says (see Call_DetailBoost) */
+	{
+		extern int detail_boost;
+		p.detail = (short) GetReg (REG_D2) - detail_boost;
+	}
 	/* btst on the first model word tests its high byte */
 	p.flags = STMemory_ReadByte (model) & 0xff;
 	for (i = 0; i < 16; i++)
