@@ -116,10 +116,23 @@ static void set_ctrl_viewport ()
 #define GL_NEAR_PLANE	1.0f
 #define GL_FAR_PLANE	10000000000.0f
 
+static void planet_forget_textures (void);
+
 static void change_vidmode ()
 {
 	const SDL_VideoInfo *info = NULL;
 	int modes;
+
+	/* On some platforms (Windows, macOS) SDL 1.2 creates a new GL context
+	 * on every SDL_SetVideoMode - when the window is resized or goes
+	 * fullscreen - and every texture of the old one is gone. Release ours
+	 * while that context is still current, they get made again when
+	 * needed. */
+	planet_forget_textures ();
+	if (screen_tex) {
+		glDeleteTextures (1, &screen_tex);
+		screen_tex = 0;
+	}
 
 	info = SDL_GetVideoInfo ();
 
@@ -180,7 +193,11 @@ static void change_vidmode ()
 void Screen_Init(void)
 {
 	change_vidmode ();
-	
+
+	/* called again on every window resize: the GLU objects do not depend
+	 * on the GL context, keep them */
+	if (qobj) return;
+
 	qobj = gluNewQuadric ();
 
 	tobj = gluNewTess ();
@@ -1863,6 +1880,25 @@ static void planet_new_texture (GLuint *tex)
 #else
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 #endif
+}
+
+/* Drop every planet texture (see change_vidmode). The parsed surfaces,
+ * which live in planet.c, stay. */
+static void planet_forget_textures (void)
+{
+	int i, f;
+
+	for (i = 0; i < PLANET_TEX_CACHE; i++) {
+		struct PlanetTex *t = &planet_tex[i];
+		if (!t->used) continue;
+		for (f = 0; f < 6; f++) {
+			glDeleteTextures (PLANET_MAX_ZONES, t->face_tex[f]);
+			free (t->face_codes[f]);
+		}
+		glDeleteTextures (PLANET_MAX_ZONES, t->patch_tex);
+		free (t->patch_codes);
+		memset (t, 0, sizeof (*t));
+	}
 }
 
 static void planet_face_patch (int f, struct PPatch *pt)
