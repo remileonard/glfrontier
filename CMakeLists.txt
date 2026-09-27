@@ -177,8 +177,15 @@ target_include_directories(frontier PRIVATE
 	${GEN68K_DIR}
 )
 
+# -fwrapv: the C translation of the 68k code computes the overflow flag
+# from signed additions and subtractions that may overflow, which is
+# undefined behaviour in C. clang (macOS) optimizes such code assuming it
+# never overflows, and loops relying on the flag ('add.l d0,d0 / bvc', in
+# the planet projection code among others) then never end. -fwrapv makes
+# signed arithmetic wrap around, like the 68000's does.
 target_compile_options(frontier PRIVATE
 	-Wall -Wno-unused
+	-fwrapv
 )
 
 # lets a build run from its build directory find sfx/ etc. (see src/paths.c)

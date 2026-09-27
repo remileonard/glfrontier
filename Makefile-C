@@ -10,7 +10,7 @@ SDL_CONFIG := $(shell $(CC) --print-sysroot)/usr/bin/sdl-config
 SDL_CFLAGS := $(shell $(SDL_CONFIG) --cflags)
 SDL_LIBS := $(shell $(SDL_CONFIG) --libs)
 
-CFLAGS := -O3 -fomit-frame-pointer -Wall -Wno-unused $(SDL_CFLAGS) -DOGG_MUSIC
+CFLAGS := -O3 -fomit-frame-pointer -fwrapv -Wall -Wno-unused $(SDL_CFLAGS) -DOGG_MUSIC
 
 LIBS := -lvorbisfile -lvorbis -logg $(SDL_LIBS) -lSDL_image
 
