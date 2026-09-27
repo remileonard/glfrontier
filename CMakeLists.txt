@@ -230,12 +230,25 @@ if(MAKE_APP_BUNDLE)
 		${SDL_LIBRARY_DIRS} ${VORBISFILE_LIBRARY_DIRS} ${VORBIS_LIBRARY_DIRS} ${OGG_LIBRARY_DIRS})
 	list(REMOVE_DUPLICATES BUNDLE_LIB_DIRS)
 	# sdl12-compat (Homebrew's SDL 1.2) loads SDL2 at run time with
-	# dlopen, which fixup_bundle cannot see: ship it alongside.
-	find_library(SDL2_DYLIB NAMES SDL2-2.0.0 SDL2 HINTS ${SDL_LIBRARY_DIRS})
+	# dlopen, which fixup_bundle cannot see: ship it too, where
+	# sdl12-compat looks for it inside an application (see LoadSDL20Library
+	# in its SDL12_compat.c): next to itself in Contents/Frameworks, or as
+	# Contents/Frameworks/SDL2.framework.
+	set(saved_find_framework ${CMAKE_FIND_FRAMEWORK})
+	set(CMAKE_FIND_FRAMEWORK LAST)
+	find_library(SDL2_RUNTIME_LIBRARY NAMES SDL2-2.0.0 SDL2 HINTS ${SDL_LIBRARY_DIRS})
+	set(CMAKE_FIND_FRAMEWORK ${saved_find_framework})
 	set(BUNDLE_EXTRA_LIB "")
-	if(SDL2_DYLIB)
-		get_filename_component(SDL2_DYLIB_REAL ${SDL2_DYLIB} REALPATH)
-		install(FILES ${SDL2_DYLIB_REAL} DESTINATION Frontier.app/Contents/Frameworks
+	if(SDL2_RUNTIME_LIBRARY MATCHES "\\.framework/?$")
+		# e.g. /Library/Frameworks/SDL2.framework from libsdl.org
+		install(DIRECTORY ${SDL2_RUNTIME_LIBRARY}
+			DESTINATION Frontier.app/Contents/Frameworks
+			USE_SOURCE_PERMISSIONS
+			PATTERN "Headers" EXCLUDE)
+		set(BUNDLE_EXTRA_LIB "\${CMAKE_INSTALL_PREFIX}/Frontier.app/Contents/Frameworks/SDL2.framework/Versions/A/SDL2")
+	elseif(SDL2_RUNTIME_LIBRARY)
+		get_filename_component(sdl2_real ${SDL2_RUNTIME_LIBRARY} REALPATH)
+		install(FILES ${sdl2_real} DESTINATION Frontier.app/Contents/Frameworks
 			RENAME libSDL2-2.0.0.dylib)
 		set(BUNDLE_EXTRA_LIB "\${CMAKE_INSTALL_PREFIX}/Frontier.app/Contents/Frameworks/libSDL2-2.0.0.dylib")
 	endif()
