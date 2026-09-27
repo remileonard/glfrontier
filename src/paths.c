@@ -62,7 +62,7 @@ static void exe_path (const char *argv0, char *out, size_t size)
 
 static void mkdir_p (const char *path)
 {
-	char buf[PATH_MAX], *p;
+	char buf[PATH_MAX + 16], *p;
 
 	snprintf (buf, sizeof (buf), "%s", path);
 	for (p = buf + 1; *p; p++) {
@@ -90,7 +90,7 @@ void Paths_Init (const char *argv0)
 	    strcmp (exe + len - (sizeof (bundle_suffix) - 1), bundle_suffix) == 0) {
 		/* Frontier.app/Contents/MacOS/frontier */
 		const char *home = getenv ("HOME");
-		char data[PATH_MAX], savs[PATH_MAX];
+		char data[PATH_MAX], savs[PATH_MAX + 8];
 
 		exe[len - (sizeof ("/MacOS") - 1)] = '\0';
 		snprintf (resource_dir, sizeof (resource_dir), "%s/Resources", exe);
@@ -98,7 +98,9 @@ void Paths_Init (const char *argv0)
 		/* launched from the Finder the current directory is /, which is
 		 * not writable: saves go to Application Support instead */
 		if (home) {
-			snprintf (data, sizeof (data), "%s/Library/Application Support/Frontier", home);
+			if (snprintf (data, sizeof (data), "%s/Library/Application Support/Frontier", home)
+			    >= (int) sizeof (data))
+				return;
 			snprintf (savs, sizeof (savs), "%s/savs", data);
 			mkdir_p (savs);
 			if (chdir (data) != 0)
@@ -111,13 +113,24 @@ void Paths_Init (const char *argv0)
 
 const char *Paths_Resource (const char *rel)
 {
-	static char buf[4][PATH_MAX];
+	static char buf[4][2 * PATH_MAX];
 	static int next;
 	char *b;
 
-	if (!resource_dir[0] || rel[0] == '/' || access (rel, R_OK) == 0)
+	if (rel[0] == '/' || access (rel, R_OK) == 0)
 		return rel;
 	b = buf[next++ & 3];
-	snprintf (b, PATH_MAX, "%s/%s", resource_dir, rel);
+	if (resource_dir[0]) {
+		snprintf (b, 2 * PATH_MAX, "%s/%s", resource_dir, rel);
+		if (access (b, R_OK) == 0) return b;
+	}
+#ifdef FRONTIER_SOURCE_DIR
+	/* running a development build from its build directory */
+	snprintf (b, 2 * PATH_MAX, "%s/%s", FRONTIER_SOURCE_DIR, rel);
+	if (access (b, R_OK) == 0) return b;
+#endif
+	/* not found anywhere: report the resource directory path */
+	if (resource_dir[0]) snprintf (b, 2 * PATH_MAX, "%s/%s", resource_dir, rel);
+	else snprintf (b, 2 * PATH_MAX, "%s", rel);
 	return b;
 }

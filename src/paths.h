@@ -3,7 +3,9 @@
  *
  * Read-only data (fe2.s.bin, sfx/, music/, joystick.ini) is looked up in
  * the current directory first, then in the resource directory: next to the
- * executable, or Contents/Resources inside a macOS application bundle.
+ * executable, or Contents/Resources inside a macOS application bundle; and
+ * last in the source tree the executable was built from, when that is
+ * known (FRONTIER_SOURCE_DIR), for development builds run from anywhere.
  *
  * Inside a bundle the current directory is also moved to a writable place,
  * ~/Library/Application Support/Frontier, where the game keeps its saves
