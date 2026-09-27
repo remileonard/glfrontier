@@ -19,6 +19,7 @@
 #include "audio.h"
 #include "../m68000.h"
 #include "hostcall.h"
+#include "paths.h"
 #include "input.h"
 #include "joystick.h"
 #include "keymap.h"
@@ -309,6 +310,9 @@ int main(int argc, char *argv[])
 	
   /* Generate random seed */
   srand( time(NULL) );
+
+  /* Find the game's files, and the saves directory */
+  Paths_Init(argv[0]);
 
   /* Check for any passed parameters */
   Main_ReadParameters(argc, argv);

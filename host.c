@@ -5,6 +5,7 @@
  */
 
 #include "host.h"
+#include "src/paths.h"
 
 # ifdef M68K_DEBUG
 int line_no;
@@ -137,6 +138,7 @@ void load_binfile (const char *bin_filename)
 	s32 reloc, next, pos, code_end, len, i = 0;
 	FILE *f;
 
+	bin_filename = Paths_Resource (bin_filename);
 	if ((f = fopen (bin_filename, "r")) == NULL) {
 		fprintf (stderr, "Error opening 68k-binary '%s'\n", bin_filename);
 		//SDL_Quit ();

@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "keymap.h"
+#include "paths.h"
 #include "input.h"
 #include "joystick.h"
 #include "shortcut.h"
@@ -332,7 +333,7 @@ void Keymap_Init(void)
     if (SDL_NumJoysticks())
     {
         joystick = SDL_JoystickOpen(0);
-        joystick_read_config("joystick.ini");
+        joystick_read_config(Paths_Resource("joystick.ini"));
     }
 }
 
