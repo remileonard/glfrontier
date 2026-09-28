@@ -5,8 +5,9 @@
 #   cmake -B build
 #   cmake --build build -j
 #
-# This builds a plain 'frontier' executable. On macOS a self-contained
-# Frontier.app (game data, SDL, Ogg Vorbis... inside) is made by installing:
+# This builds a plain 'frontier' executable. On macOS Frontier.app (with the
+# game data inside, using the SDL, Ogg Vorbis... installed on this Mac) is
+# made by installing:
 #   cmake --install build --prefix dist      # -> dist/Frontier.app
 # or, the same into <builddir>/dist:
 #   cmake --build build --target dist
@@ -222,7 +223,9 @@ endif()
 
 # --- macOS application bundle, made by 'cmake --install' -------------------
 #
-# Frontier.app/Contents/MacOS/Frontier is the executable built above;
+# Frontier.app/Contents/MacOS/Frontier is the executable built above, still
+# linked to the libraries installed on this Mac (SDL, Ogg Vorbis...): the
+# application is not meant to be copied to another machine.
 # Contents/Resources gets everything the game reads at run time (see
 # src/paths.c): fe2.s.bin, sfx/, music/ (if present), joystick.ini and an
 # optional Frontier.icns. Saved games go to
@@ -275,43 +278,6 @@ ${BUNDLE_ICON}	<key>NSHighResolutionCapable</key>
 		install(DIRECTORY ${CMAKE_SOURCE_DIR}/music/ DESTINATION ${APP}/Resources/music
 			FILES_MATCHING PATTERN "*.ogg")
 	endif()
-
-	# Make it self-contained: fixup_bundle copies the non-system libraries
-	# the executable links (SDL, Ogg Vorbis...) into Contents/Frameworks and
-	# points the executable at them.
-	set(BUNDLE_LIB_DIRS
-		${SDL_LIBRARY_DIRS} ${VORBISFILE_LIBRARY_DIRS} ${VORBIS_LIBRARY_DIRS} ${OGG_LIBRARY_DIRS})
-	list(REMOVE_DUPLICATES BUNDLE_LIB_DIRS)
-	# sdl12-compat (Homebrew's SDL 1.2) loads SDL2 at run time with
-	# dlopen, which fixup_bundle cannot see: ship it too, where
-	# sdl12-compat looks for it inside an application (see LoadSDL20Library
-	# in its SDL12_compat.c): next to itself in Contents/Frameworks, or as
-	# Contents/Frameworks/SDL2.framework.
-	set(saved_find_framework ${CMAKE_FIND_FRAMEWORK})
-	set(CMAKE_FIND_FRAMEWORK LAST)
-	find_library(SDL2_RUNTIME_LIBRARY NAMES SDL2-2.0.0 SDL2 HINTS ${SDL_LIBRARY_DIRS})
-	set(CMAKE_FIND_FRAMEWORK ${saved_find_framework})
-	set(BUNDLE_EXTRA_LIB "")
-	if(SDL2_RUNTIME_LIBRARY MATCHES "\\.framework/?$")
-		# e.g. /Library/Frameworks/SDL2.framework from libsdl.org
-		install(DIRECTORY ${SDL2_RUNTIME_LIBRARY}
-			DESTINATION ${APP}/Frameworks
-			USE_SOURCE_PERMISSIONS
-			PATTERN "Headers" EXCLUDE)
-		set(BUNDLE_EXTRA_LIB "\${CMAKE_INSTALL_PREFIX}/${APP}/Frameworks/SDL2.framework/Versions/A/SDL2")
-	elseif(SDL2_RUNTIME_LIBRARY)
-		get_filename_component(sdl2_real ${SDL2_RUNTIME_LIBRARY} REALPATH)
-		install(FILES ${sdl2_real} DESTINATION ${APP}/Frameworks RENAME libSDL2-2.0.0.dylib)
-		set(BUNDLE_EXTRA_LIB "\${CMAKE_INSTALL_PREFIX}/${APP}/Frameworks/libSDL2-2.0.0.dylib")
-	endif()
-	install(CODE "
-		include(BundleUtilities)
-		set(BU_CHMOD_BUNDLE_ITEMS ON)
-		fixup_bundle(\"\${CMAKE_INSTALL_PREFIX}/Frontier.app\" \"${BUNDLE_EXTRA_LIB}\" \"${BUNDLE_LIB_DIRS}\")
-		# changing the libraries broke their signatures: sign it all again
-		# (ad hoc), or macOS refuses to run it on Apple Silicon
-		execute_process(COMMAND codesign --force --deep --sign - \"\${CMAKE_INSTALL_PREFIX}/Frontier.app\")
-	")
 
 	# cmake --build build --target dist  ->  build/dist/Frontier.app
 	add_custom_target(dist
