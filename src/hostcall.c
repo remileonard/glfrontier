@@ -73,6 +73,22 @@
 #define GEMDOS_ELOOP -80   // Too many symbolic links
 #define GEMDOS_EMOUNT -200 // Mount point crossed (indicator)
 
+/*
+ * Called at the end of fe2.s L725d4_SetDetailOpts with the two shape
+ * detail levels of the chosen "Level of Shape Detail" in d1 and d2
+ * (Very High is 1 and 2). They are shifts applied to the distance
+ * thresholds in the models (L3ca9c, L3cafa): every +1 doubles the distance
+ * at which model details (buildings, starport and city details...) still
+ * get drawn. --detail-boost adds to both.
+ */
+int detail_boost = 0;
+
+void Call_DetailBoost()
+{
+	SetReg (REG_D1, (short) GetReg (REG_D1) + detail_boost);
+	SetReg (REG_D2, (short) GetReg (REG_D2) + detail_boost);
+}
+
 void Call_Memset()
 {
 	int adr, count;
@@ -988,7 +1004,7 @@ HOSTCALL hcalls[] = {
 	&Call_Fopendir, /* 0x25 */
 	&Call_Freaddir,
 	&Call_Fclosedir,
-	NULL,
+	&Call_DetailBoost, /* 0x28 */
 	NULL,
 	NULL,
 	NULL,
@@ -1070,7 +1086,10 @@ HOSTCALL hcalls[] = {
 	Nu_PutCylinder,
 	Nu_PutBlob,
 	Nu_PutPlanet,
-	Nu_Put2DLine
+	Nu_Put2DLine,
+	Nu_ComplexAbort,
+	Nu_ZTreePush,
+	Nu_ZTreePop
 #else
 	not_available,
 	not_available,
@@ -1092,6 +1111,9 @@ HOSTCALL hcalls[] = {
 	not_available,
 	not_available,
 	Nu_IsGLRenderer,
+	not_available,
+	not_available,
+	not_available,
 	not_available,
 	not_available,
 	not_available,

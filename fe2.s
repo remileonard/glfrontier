@@ -35,6 +35,7 @@ Call_Fdelete		equ	$24
 Call_Fopendir		equ	$25
 Call_Freaddir		equ	$26
 Call_Fclosedir		equ	$27
+Call_DetailBoost	equ	$28
 Nu_PutTriangle		equ	$60
 Nu_PutQuad		equ	$61
 Nu_PutLine		equ	$62
@@ -61,6 +62,9 @@ Nu_PutCylinder		equ	$76
 Nu_PutBlob		equ	$77
 Nu_PutPlanet		equ	$78
 Nu_Draw2DLine		equ	$79
+Nu_ComplexAbort		equ	$7a
+Nu_ZTreePush		equ	$7b
+Nu_ZTreePop		equ	$7c
 
 * don't change. it won't work yet.
 SCR_W			equ	320
@@ -12510,7 +12514,9 @@ L3a202:
 		rts
 
 	* this is the detail of Z-sorting i have not implemented...
-	l3a494:	lea	L385d0_3dview_thing2,a0
+	* End of a nested z-tree: go back to sorting into the parent one.
+	l3a494:	hcall	#Nu_ZTreePop
+		lea	L385d0_3dview_thing2,a0
 		move.l	4(a0),0(a0)
 		move.l	8(a0),4(a0)
 		move.l	12(a0),8(a0)
@@ -12564,6 +12570,10 @@ L3a4b4:
 		move.l	4(a2),8(a2)
 		move.l	0(a2),4(a2)
 		move.l	a1,L385d0_3dview_thing2
+		* The node just inserted becomes the root of a nested z-tree:
+		* what follows is sorted within it, and painted as one block at
+		* its place in the parent tree.
+		hcall	#Nu_ZTreePush
 		moveq	#0,d0
 		moveq	#0,d1
 		moveq	#0,d2
@@ -14355,6 +14365,11 @@ L3b7ac:
 		dc.w	L3b7a4-L3b7ac
 
 L3b7ba:
+		* The complex polygon crosses the near plane and its model says
+		* to drop it altogether in that case (bit 7 of -186(a6), see
+		* l3b87e): the 2D primitives already pushed are thrown away below.
+		* Tell the GL renderer to forget the ones it was given too.
+		hcall	#Nu_ComplexAbort
 		addq.l	#1,a5
 		move.l	-190(a6),L385c8_primitives_end
 		movea.l	L385c8_primitives_end,a0
@@ -16341,6 +16356,11 @@ planet_pos:	ds.l	1
 planet_rad:	ds.l	1
 planet_col1:	ds.w	1
 planet_col2:	ds.w	1
+* For the GL renderer (Nu_PutPlanet): start of the planet model data
+* (just after the radius/vertex long) and of its surface feature list
+* (continents, seas, ice caps...).
+planet_model:	ds.l	1
+planet_features:	ds.l	1
 
 L3cd9c_ProjectPlanet:
 		lea	-214(a7),a7
@@ -16350,6 +16370,7 @@ L3cd9c_ProjectPlanet:
 		move.w	d6,32(a3)
 		move.l	(a5)+,d7
 		move.l	a5,194(a3)
+		move.l	a5,planet_model
 		move.w	d7,d0
 		* this is planet feature detail
 		moveq	#18,d6
@@ -16971,6 +16992,7 @@ L3cf4a:
 		bne.s	l3d3ea
 
 L3d3f0:
+		move.l	a5,planet_features
 		move.l	a4,-(a7)
 		move.b	#$ff,210(a3)
 		clr.w	212(a3)
@@ -17158,7 +17180,7 @@ fuck_planet:
 		move.w	(a3),planet_col1
 
 		* YAY! (planet col in d6)
-		movem.l	a0-1/d0-1/d6,-(a7)
+		movem.l	a0-2/a4/d0-3/d6,-(a7)
 		move.l	planet_rad(pc),d0
 		move.l	planet_pos(pc),a0
 		move.w	planet_col1(pc),d6
@@ -17166,8 +17188,16 @@ fuck_planet:
 		lea	-198(a6),a1
 		* lightsource color
 		move.w	-104(a6),d1
+		* surface features, model data and detail level for the GL
+		* renderer. a3 still points at the ProjectPlanet frame: the
+		* movem above only clobbers it from 178(a3) on, so its colour
+		* table (0-30(a3)) and planet position (122(a3)) are intact.
+		move.l	planet_features(pc),a2
+		move.l	planet_model(pc),a4
+		move.w	L60d4_optdetail2,d2
+		move.w	L60d6_optdetail3,d3
 		hcall	#Nu_PutPlanet
-		movem.l	(a7)+,a0-1/d0-1/d6
+		movem.l	(a7)+,a0-2/a4/d0-3/d6
 		rts
 
 L3d5dc_PushPlanetCol:
@@ -48277,7 +48307,9 @@ L725d4_SetDetailOpts:
 		moveq	#1,d1
 		moveq	#2,d2
 		moveq	#0,d3
-	l72608:	move.w	d1,A6_optdetail1(a6)
+	* let the host push the shape detail distances further (d1, d2)
+	l72608:	hcall	#Call_DetailBoost
+		move.w	d1,A6_optdetail1(a6)
 		move.w	d2,A6_optdetail2(a6)
 		move.w	d3,A6_optdetail3(a6)
 		move.b	10460(a6),10468(a6)

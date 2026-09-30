@@ -131,16 +131,70 @@ superposition apparaissent (ex. vaisseaux/anneaux qui se chevauchent mal).
 
 ## Fonctionnalités explicitement incomplètes (annotées par l'auteur d'origine)
 
-### 6. `Nu_PutPlanet` / `Nu_DrawPlanet` — "not finished by a long shot"
+### 6. `Nu_PutPlanet` / `Nu_DrawPlanet` — rendu des surfaces planétaires (corrigé)
 
-[src/gl.c](src/gl.c#L1427)
+**Comment le jeu dessine une planète** (fe2.s `L3cd9c_ProjectPlanet`) :
+aucune texture. Après l'en-tête (flags + couleurs de base, couches
+d'atmosphère), le modèle contient une liste d'éléments de surface codée en
+octets (continents, mers, calottes...) : des polygones sur la sphère
+(sommets `x y z` en octets signés) et des cercles. Chaque élément porte un
+code couleur ; le scan-converter 2D (`L35b28_DrawPlanet`) remplit en
+pair/impair en faisant un **XOR** des codes, qui indexent une table de 16
+couleurs préparée en `0-30(a3)`. Le jour/la nuit sont d'autres « éléments »
+XOR : le terminateur (bit 7 des flags) et deux petits cercles de pénombre à
+75,5° et 82,8° du point subsolaire (bits 6 et 5). Les côtes sont fractales :
+chaque arête est subdivisée (`L3de2e`) avec un déplacement aléatoire du
+milieu le long des axes du modèle, tiré d'un générateur seedé par l'objet
+(`118(objet)`) dont l'état est sauvé/restauré à chaque subdivision — le
+déplacement d'un milieu ne dépend donc que de sa position dans l'arbre de
+subdivision, pas de la profondeur atteinte (qui, elle, dépend de la vue).
 
-Les planètes sont approximées par une icosphere subdivisée
-(`nuSphere`/`nuSubdivide`, profondeur fixe `NUSPHERE_SUBDIVS=4`), avec un
-éclairage `GL_LIGHT1` mais **aucune texture de surface** (pas de bandes
-nuageuses, pas de relief, pas de texture planète du tout). Le facteur
-`size*1.0080` ("why the fucking fudge factor??") suggère aussi un ajustement
-empirique jamais vraiment résolu.
+**Ce que fait le renderer GL maintenant** :
+
+- `fe2.s` passe à `Nu_PutPlanet` l'adresse de la liste d'éléments
+  (`planet_features`), celle du modèle (`planet_model`) et les niveaux de
+  détail ; `a3` pointe toujours sur la table de couleurs.
+- [src/planet.c](src/planet.c) décode la liste et rastérise les codes XOR
+  sur n'importe quel patch gnomonique de la sphère (où les arcs de grand
+  cercle sont des segments), en reproduisant exactement le générateur
+  aléatoire et les déplacements fractals du jeu, subdivisés jusqu'à la
+  résolution du patch.
+- Vue de l'espace : sphère-cube avec une texture par face (512²).
+- Près du sol (d < 1,25 R) : le « dôme » des directions qui touchent la
+  surface, texturé par un patch local 1024² centré sous la caméra,
+  rastérisé à partir des mêmes contours (juste plus subdivisés) : mers et
+  continents sont exactement au même endroit que vus de l'espace, avec
+  plus de détail de côte.
+- Éclairage : une texture par zone de lumière (nuit / pénombres / jour),
+  cuite une fois ; chaque zone est découpée exactement dans la géométrie
+  (les limites des zones sont des plans), d'où des bandes nettes comme sur
+  ST, sans recuisson quand la planète tourne.
+- Les couches d'atmosphère du modèle sont dessinées : liseré autour de la
+  planète vue de près, bandes de ciel au-dessus de l'horizon au sol.
+
+Vérifié contre le renderer logiciel sur l'intro (planète avec continent,
+terminateur, liseré) et posé sur Merlin (bandes de ciel).
+
+### 6b. Marquages au sol des astroports invisibles (corrigé)
+
+Pistes, routes et lacs des astroports n'apparaissaient pas en GL : un grand
+polygone de terrain vert, situé *sous* l'astroport, était peint par-dessus.
+
+Cause : le jeu ne trie pas tout dans un seul arbre de profondeur. La
+commande objet $15 (`L3a4b4`) insère un nœud et en fait la racine d'un
+**sous-arbre** ; tout ce qui suit y est trié jusqu'au dépilement
+(`l3a494`, commenté « this is the detail of Z-sorting i have not
+implemented... »), et le sous-arbre est peint d'un bloc à la place de ce
+nœud. Le renderer GL aplatissait tout dans un arbre global, ce qui
+changeait l'ordre entre le terrain de fond et le groupe des décors au sol.
+
+Correctif : hostcalls `Nu_ZTreePush` / `Nu_ZTreePop` (0x7b / 0x7c) et
+primitive `NU_SUBTREE` dans gl.c, qui reproduisent les arbres imbriqués.
+
+Au passage : quand un polygone complexe marqué pour cela (bit 7 de
+`-186(a6)`) traverse le plan proche, le jeu l'abandonne et efface ce qu'il
+avait déjà émis (`L3b7ba`). Le hostcall `Nu_ComplexAbort` (0x7a) fait
+oublier ce polygone au renderer GL aussi (cas non rencontré dans l'intro).
 
 ### 7. `Nu_PutOval` / `Nu_DrawOval` — "this primitive is WRONG"
 
@@ -200,8 +254,8 @@ explicitement comme non résolu par l'auteur d'origine.
 4. **Réactiver/corriger la rotation de `Nu_DrawOval`**.
 5. Fuite mémoire de `combineCallback` — à corriger si des sessions de jeu
    longues sont un cas d'usage visé.
-6. Ajout de texture(s) planète pour `Nu_DrawPlanet` — gros morceau,
-   optionnel/esthétique.
+6. ~~Ajout de texture(s) planète pour `Nu_DrawPlanet`~~ — fait, voir le
+   point 6.
 
 Dis-moi lesquels tu veux que je corrige en premier (je recommande de
 commencer par le point 1, qui est un vrai bug mémoire, puis le point 2 qui

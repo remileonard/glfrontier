@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "audio.h"
+#include "paths.h"
 #include "../m68000.h"
 
 #ifdef OGG_MUSIC
@@ -57,7 +58,7 @@ static void play_music (int track)
 	
 	snprintf (buf, sizeof (buf), "music/%02d.ogg", track);
 
-	f = fopen (buf, "rb");
+	f = fopen (Paths_Resource (buf), "rb");
 	if (f == NULL) {
 		music_playing = FALSE;
 		return;
@@ -330,7 +331,7 @@ void Audio_Init(void)
 
   for (i=0; i<MAX_SAMPLES; i++) {
 	  snprintf (filename, sizeof (filename), "sfx/sfx_%02d.wav", i);
-	  if (SDL_LoadWAV (filename, &desiredAudioSpec, &sfx_buf[i].buf,
+	  if (SDL_LoadWAV (Paths_Resource (filename), &desiredAudioSpec, &sfx_buf[i].buf,
 				  &sfx_buf[i].buf_len) == NULL) {
 	  	printf ("Error loading %s: %s\n", filename, SDL_GetError ());
 		sfx_buf[i].buf = NULL;
